@@ -82,8 +82,8 @@ Exactly **one instrument** was used for bench validation:
   `CPUID = 0x412FC231` Cortex-M3 r2p1)
 - Display controller ID read back as **0x858552** (compatible, not genuine ILI9341)
 - Console UART on an FT232R at 115200 8N1
-- ST-LINK/V2 for read-only SWD access (serial `12010C1C8418303030303032` on the
-  unit used during development)
+- ST-LINK/V2 for read-only SWD access (serial anonymized — the specific
+  adapter used during development; any ST-LINK/V2 should work for read-only access)
 
 **Compatibility with other DSO183 hardware revisions, clones, display panels,
 or ST-Link adapters has not been tested and is not claimed.** If you are
