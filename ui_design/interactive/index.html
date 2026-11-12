@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DSO183 Oscilloscope - Retro UI Simulator & Design System</title>
+  <style>
+    :root {
+      --bg-chassis: #1a1e24;
+      --bg-panel: #222933;
+      --bezel-border: #333d4d;
+      --screen-glass: #060a10;
+      --trace-cyan: #00e5ff;
+      --phosphor-amber: #ffc400;
+      --grid-blue: #15263a;
+      --border-blue: #2b4e73;
+      --text-ice: #e2edf8;
+      --text-muted: #829ab1;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: #0e1218;
+      color: #e0e5eb;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace, sans-serif;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 24px;
+      max-width: 900px;
+    }
+
+    header h1 {
+      font-size: 22px;
+      letter-spacing: 1px;
+      color: #ffffff;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    header p {
+      font-size: 13px;
+      color: #8fa0b5;
+      line-height: 1.5;
+    }
+
+    .badge-pill {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: bold;
+      padding: 3px 8px;
+      border-radius: 3px;
+      background: #00223d;
+      color: #00e5ff;
+      border: 1px solid #00e5ff;
+      margin-right: 6px;
+    }
+
+    /* Instrument Workbench Container */
+    .bench-layout {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 32px;
+      justify-content: center;
+      max-width: 1200px;
+      width: 100%;
+    }
+
+    /* Hardware Enclosure */
+    .chassis {
+      background: linear-gradient(145deg, #242c38, #181d24);
+      border: 3px solid #3c495c;
+      border-radius: 8px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8), inset 0 1px 2px rgba(255, 255, 255, 0.1);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 720px;
+    }
+
+    .chassis-header {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      border-bottom: 2px solid #2d3848;
+      padding-bottom: 8px;
+    }
+
+    .instrument-brand {
+      font-size: 14px;
+      font-weight: 900;
+      letter-spacing: 2px;
+      color: #a4b4c7;
+    }
+
+    .instrument-model {
+      font-size: 12px;
+      color: #00e5ff;
+      font-family: monospace;
+      background: #09131f;
+      padding: 2px 6px;
+      border: 1px solid #1c3c5c;
+      border-radius: 2px;
+    }
+
+    /* Display Bezel */
+    .display-bezel {
+      background: #000000;
+      border: 8px solid #141a22;
+      border-radius: 6px;
+      box-shadow: inset 0 0 15px rgba(0, 0, 0, 0.9), 0 4px 10px rgba(0,0,0,0.5);
+      position: relative;
+      overflow: hidden;
+      width: 640px;
+      height: 480px;
+    }
+
+    /* Clean Glass Container (No Scanlines) */
+    .screen-glass {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      background: #060a10;
+    }
+
+    .screen-glass img, .screen-glass svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      image-rendering: pixelated;
+    }
+
+    /* Physical Controls Console */
+    .controls-panel {
+      width: 100%;
+      margin-top: 20px;
+      background: #1c232c;
+      border: 1px solid #2e3947;
+      border-radius: 4px;
+      padding: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 16px;
+    }
+
+    .tactile-btn {
+      background: linear-gradient(180deg, #374455, #222b37);
+      color: #e2edf8;
+      border: 2px solid #48596e;
+      border-bottom: 4px solid #151b22;
+      border-radius: 4px;
+      padding: 10px 18px;
+      font-size: 12px;
+      font-weight: bold;
+      font-family: monospace;
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.08s ease;
+    }
+
+    .tactile-btn:hover {
+      background: linear-gradient(180deg, #425266, #2a3544);
+      color: #ffffff;
+    }
+
+    .tactile-btn:active {
+      transform: translateY(2px);
+      border-bottom-width: 2px;
+    }
+
+    .tactile-btn span {
+      font-size: 9px;
+      color: #8fa0b5;
+      font-weight: normal;
+    }
+
+    .switch-indicator {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-family: monospace;
+      font-size: 11px;
+      color: #8fa0b5;
+    }
+
+    .switch-pill {
+      background: #0d141e;
+      border: 1px solid #233448;
+      padding: 4px 8px;
+      border-radius: 3px;
+      color: #00e5ff;
+    }
+
+    /* Sidebar Documentation & Inspector */
+    .inspector-panel {
+      flex: 1;
+      min-width: 340px;
+      background: #171d26;
+      border: 1px solid #2a3544;
+      border-radius: 6px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .inspector-panel h2 {
+      font-size: 15px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #00e5ff;
+      border-bottom: 1px solid #2a3544;
+      padding-bottom: 8px;
+    }
+
+    .screen-selector {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+
+    .nav-btn {
+      background: #1f2733;
+      border: 1px solid #324052;
+      color: #b8c8d8;
+      padding: 10px 14px;
+      border-radius: 4px;
+      text-align: left;
+      font-size: 12px;
+      font-family: monospace;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: all 0.15s ease;
+    }
+
+    .nav-btn:hover {
+      background: #2a3647;
+      color: #ffffff;
+      border-color: #00e5ff;
+    }
+
+    .nav-btn.active {
+      background: #00223d;
+      border-color: #00e5ff;
+      color: #00e5ff;
+      font-weight: bold;
+    }
+
+    .palette-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      font-size: 11px;
+      font-family: monospace;
+    }
+
+    .color-swatch {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #10161f;
+      padding: 6px 8px;
+      border-radius: 3px;
+      border: 1px solid #233040;
+    }
+
+    .swatch-box {
+      width: 16px;
+      height: 16px;
+      border-radius: 2px;
+      border: 1px solid #444;
+    }
+
+    .info-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      font-family: monospace;
+    }
+
+    .info-table th {
+      text-align: left;
+      color: #829ab1;
+      padding: 4px 6px;
+      border-bottom: 1px solid #2a3544;
+    }
+
+    .info-table td {
+      padding: 5px 6px;
+      border-bottom: 1px solid #1c2430;
+      color: #e2edf8;
+    }
+
+    .desc-box {
+      background: #10161f;
+      border-left: 3px solid #ffc400;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #b8c8d8;
+    }
+
+    .desc-box strong {
+      color: #ffc400;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>DSO183 Oscilloscope &bull; Dark Blue Instrumentation UI</h1>
+    <p>320&times;240 ILI9341 &bull; Direct GRAM Rendering &bull; Electric Cyan Waveform &bull; Dark Blue Reticle</p>
+  </header>
+
+  <div class="bench-layout">
+    
+    <!-- Oscilloscope Hardware Chassis -->
+    <div class="chassis">
+      <div class="chassis-header">
+        <span class="instrument-brand">JYE TECH / DSO183 CUSTOM FIRMWARE V6</span>
+        <span class="instrument-model">320 &times; 240 RGB565</span>
+      </div>
+
+      <!-- Display Screen (640x480 presentation = 2x scale of native 320x240) -->
+      <div class="display-bezel">
+        <div id="screenGlass" class="screen-glass">
+          <img id="screenImage" src="../mockups/screen_01_main_run@4x.png" alt="DSO183 Screen Mockup" />
+        </div>
+      </div>
+
+      <!-- Physical Front-Panel Controls Simulation -->
+      <div class="controls-panel">
+        <div class="btn-group">
+          <button class="tactile-btn" id="btnOk" onclick="handleBtn('OK')">
+            OK
+            <span>[PB12: RUN/HOLD]</span>
+          </button>
+          <button class="tactile-btn" id="btnPlus" onclick="handleBtn('PLUS')">
+            +
+            <span>[PB13: STEP UP]</span>
+          </button>
+          <button class="tactile-btn" id="btnMinus" onclick="handleBtn('MINUS')">
+            -
+            <span>[PB14: STEP DN]</span>
+          </button>
+          <button class="tactile-btn" id="btnSel" onclick="handleBtn('SEL')">
+            SEL
+            <span>[PB15: FOCUS/MENU]</span>
+          </button>
+        </div>
+
+        <div class="switch-indicator">
+          <span>SEN1 (GAIN) : <strong class="switch-pill">x2</strong></span>
+          <span>SEN2 (RANGE): <strong class="switch-pill">1V</strong></span>
+          <span>CPL  (COUP) : <strong class="switch-pill">DC</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Sidebar Inspector -->
+    <div class="inspector-panel">
+      <h2>Display Screen Views</h2>
+      <div class="screen-selector">
+        <button class="nav-btn active" onclick="loadScreen(1, this)">
+          <span>01. Main Scope (RUN State)</span>
+          <span class="badge-pill">RUN</span>
+        </button>
+        <button class="nav-btn" onclick="loadScreen(2, this)">
+          <span>02. Main Scope (HOLD / STOP)</span>
+          <span style="color:#ff8200;font-weight:bold;font-size:11px;">HOLD</span>
+        </button>
+        <button class="nav-btn" onclick="loadScreen(3, this)">
+          <span>03. Quick-Focus Navigation</span>
+          <span style="color:#ffc400;font-weight:bold;font-size:11px;">SEL FOCUS</span>
+        </button>
+        <button class="nav-btn" onclick="loadScreen(4, this)">
+          <span>04. Settings &amp; Cal Menu</span>
+          <span style="color:#00e5ff;font-weight:bold;font-size:11px;">MENU</span>
+        </button>
+        <button class="nav-btn" onclick="loadScreen(5, this)">
+          <span>05. Hardware Telemetry Matrix</span>
+          <span style="color:#829ab1;font-weight:bold;font-size:11px;">DIAG</span>
+        </button>
+      </div>
+
+      <div class="desc-box" id="screenDesc">
+        <strong>Screen 01: Main Oscilloscope Display (RUN)</strong><br>
+        Centerpiece 300&times;192 graticule with dark blue reticle and center crosshair tick marks. Electric cyan waveform trace. Persistent edge readouts: Voltage Scale, Frequency (1.000 kHz), Timebase (1.00ms/div), Trigger Mode (AUTO), and Trigger Type (Rising Edge). Compact 24 px bottom bar.
+      </div>
+
+      <h2>Display Rendering Options</h2>
+      <div style="display:flex;gap:12px;">
+        <label style="font-size:12px;color:#b8c8d8;cursor:pointer;">
+          <input type="checkbox" id="vectorToggle" onchange="toggleVector(this.checked)"> Use Scalable Vector SVG
+        </label>
+      </div>
+
+      <h2>Dark Blue &amp; Cyan Color Palette (RGB565)</h2>
+      <div class="palette-grid">
+        <div class="color-swatch">
+          <div class="swatch-box" style="background:#00e5ff;"></div>
+          <span>Trace: #00E5FF</span>
+        </div>
+        <div class="color-swatch">
+          <div class="swatch-box" style="background:#15263a;"></div>
+          <span>Reticle: #15263A</span>
+        </div>
+        <div class="color-swatch">
+          <div class="swatch-box" style="background:#2b4e73;"></div>
+          <span>Border: #2B4E73</span>
+        </div>
+        <div class="color-swatch">
+          <div class="swatch-box" style="background:#060a10;"></div>
+          <span>Glass: #060A10</span>
+        </div>
+        <div class="color-swatch">
+          <div class="swatch-box" style="background:#ffc400;"></div>
+          <span>Focus: #FFC400</span>
+        </div>
+        <div class="color-swatch">
+          <div class="swatch-box" style="background:#ff8200;"></div>
+          <span>Hold: #FF8200</span>
+        </div>
+      </div>
+
+      <h2>Display Geometry Specifications</h2>
+      <table class="info-table">
+        <tr><th>Region</th><th>Bounds</th><th>Pixel Metrics</th></tr>
+        <tr><td>Top Header</td><td>Y: 0..17</td><td>320 &times; 18 px (Status &amp; Telemetry)</td></tr>
+        <tr><td>Graticule Reticle</td><td>X: 10..310, Y: 20..212</td><td>300 &times; 192 px (10&times;8 divisions)</td></tr>
+        <tr><td>Ground Marker</td><td>X: 0..9, Y: 113..119</td><td>Channel 1 0V Baseline Flag</td></tr>
+        <tr><td>Trigger Marker</td><td>X: 311..319, Y: 89..95</td><td>Trigger Crossing Flag</td></tr>
+        <tr><td>Compact Bottom Bar</td><td>Y: 216..239</td><td>320 &times; 24 px (Scales &amp; Measurements)</td></tr>
+      </table>
+    </div>
+
+  </div>
+
+  <script>
+    let currentScreen = 1;
+    let useVector = false;
+
+    const screenData = {
+      1: {
+        png: "../mockups/screen_01_main_run@4x.png",
+        svg: "../mockups/mockup_screen_01_main_run.svg",
+        desc: "<strong>Screen 01: Main Oscilloscope Display (RUN)</strong><br>Centerpiece 300&times;192 graticule with dark blue reticle and center crosshair tick marks. Electric cyan waveform trace. Persistent edge readouts: Voltage Scale, Frequency (1.000 kHz), Timebase (1.00ms/div), Trigger Mode (AUTO), and Trigger Type (Rising Edge). Compact 24 px bottom bar."
+      },
+      2: {
+        png: "../mockups/screen_02_main_hold@4x.png",
+        svg: "../mockups/mockup_screen_02_main_hold.svg",
+        desc: "<strong>Screen 02: Main Oscilloscope Display (HOLD / STOP)</strong><br>Amber HOLD badge, frozen 10.00 kHz square waveform with Gibbs ringing, high-precision measurement calculations (Vpp: 3.32V, Vrms: 1.66V, Vmax: +3.30V, Vmin: +0.02V). Compact bottom bar."
+      },
+      3: {
+        png: "../mockups/screen_03_quick_focus@4x.png",
+        svg: "../mockups/mockup_screen_03_quick_focus.svg",
+        desc: "<strong>Screen 03: Quick-Focus Parameter Selection</strong><br>Pressing SEL highlights the active parameter in high-contrast amber box ([TB: 1.00ms/d]). The central waveform remains 100% visible and active while buttons +/- step the parameter without navigating away."
+      },
+      4: {
+        png: "../mockups/screen_04_menu_settings@4x.png",
+        svg: "../mockups/mockup_screen_04_menu_settings.svg",
+        desc: "<strong>Screen 04: Instrument Configuration & Calibration Menu</strong><br>Triggered by holding SEL for >700ms. High-contrast dark blue laboratory console overlay preserving graticule context in background. Allows configuration of Timebase, Trigger Mode, Trigger Level, Cal Zero, Offset, and Gain."
+      },
+      5: {
+        png: "../mockups/screen_05_diagnostics@4x.png",
+        svg: "../mockups/mockup_screen_05_diagnostics.svg",
+        desc: "<strong>Screen 05: Hardware Diagnostics & Zero Calibration Matrix</strong><br>Full-screen technical engineering telemetry screen displaying STM32F103 boot counters, ILI9341 bus ID readback, ADC1 injected ladder readings, and the complete 9-point zero calibration table."
+      }
+    };
+
+    function loadScreen(id, btnElem) {
+      currentScreen = id;
+      const img = document.getElementById("screenImage");
+      img.src = useVector ? screenData[id].svg : screenData[id].png;
+      document.getElementById("screenDesc").innerHTML = screenData[id].desc;
+
+      if (btnElem) {
+        document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
+        btnElem.classList.add("active");
+      }
+    }
+
+    function toggleVector(enable) {
+      useVector = enable;
+      loadScreen(currentScreen, null);
+    }
+
+    function handleBtn(btn) {
+      if (btn === 'OK') {
+        if (currentScreen === 1) loadScreen(2, document.querySelectorAll(".nav-btn")[1]);
+        else if (currentScreen === 2) loadScreen(1, document.querySelectorAll(".nav-btn")[0]);
+        else if (currentScreen === 5) loadScreen(1, document.querySelectorAll(".nav-btn")[0]);
+      } else if (btn === 'SEL') {
+        if (currentScreen === 1) loadScreen(3, document.querySelectorAll(".nav-btn")[2]);
+        else if (currentScreen === 3) loadScreen(4, document.querySelectorAll(".nav-btn")[3]);
+        else if (currentScreen === 4) loadScreen(1, document.querySelectorAll(".nav-btn")[0]);
+      } else if (btn === 'PLUS' || btn === 'MINUS') {
+        if (currentScreen === 1) loadScreen(3, document.querySelectorAll(".nav-btn")[2]);
+      }
+    }
+  </script>
+</body>
+</html>

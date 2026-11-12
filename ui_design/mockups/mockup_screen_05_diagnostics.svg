@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 240" width="640" height="480" style="background:#060a10;font-family:monospace;font-size:7px;letter-spacing:0.5px;">
+  <rect x="0" y="0" width="320" height="16" fill="#0b131d" stroke="#2b4e73" stroke-width="0.5" />
+  <text x="8" y="11" fill="#e2edf8" font-weight="bold">=== DSO183 SYSTEM &amp; CALIBRATION MATRIX ===</text>
+
+  <text x="8" y="28" fill="#ffc400">-- SYSTEM TELEMETRY --</text>
+  <text x="8" y="38" fill="#e2edf8">BUILD : 0x4453424D #051A</text>
+  <text x="8" y="48" fill="#829ab1">BOOTS : 0014  LOOP: 184Hz</text>
+  <text x="8" y="58" fill="#829ab1">TICK  : 00:42:15.820</text>
+  <text x="8" y="68" fill="#829ab1">PANEL : ILI9341 ID:9341</text>
+  <text x="8" y="78" fill="#829ab1">MADCTL: 0x20 (LANDSCAPE)</text>
+  <text x="8" y="88" fill="#00e5ff">ERRORS: 0x00000000 [OK]</text>
+
+  <text x="164" y="28" fill="#ffc400">-- SWITCHES &amp; ADC1 --</text>
+  <text x="164" y="38" fill="#e2edf8">SEN1 (GAIN) : x2  (1840)</text>
+  <text x="164" y="48" fill="#e2edf8">SEN2 (RANGE): 1V  (3120)</text>
+  <text x="164" y="58" fill="#829ab1">CPL  (COUP) : DC  (2048)</text>
+  <text x="164" y="68" fill="#00e5ff">DECODED COMBO: #4 (500mV)</text>
+  <text x="164" y="78" fill="#829ab1">BTNS: OK:0 +:0 -:0 SEL:0</text>
+  <text x="164" y="88" fill="#829ab1">RAW GPIOA IDR: 0x00FF</text>
+
+  <line x1="8" y1="96" x2="311" y2="96" stroke="#15263a" stroke-width="0.5" />
+  <text x="8" y="106" fill="#ffc400">-- ZERO CALIBRATION MATRIX (ADC COUNTS) --</text>
+  <text x="8" y="116" fill="#829ab1">RANGE   GAIN x1       GAIN x2       GAIN x5</text>
+  <line x1="8" y1="120" x2="311" y2="120" stroke="#15263a" stroke-width="0.5" />
+  
+  <text x="8" y="130" fill="#e2edf8">1.0V </text><text x="52" y="130" fill="#00e5ff">C0: 1192 [OK]</text><text x="138" y="130" fill="#00e5ff">C1: 1195 [OK]</text><text x="224" y="130" fill="#00e5ff">C2: 1190 [OK]</text>
+  <text x="8" y="142" fill="#e2edf8">0.1V </text><text x="52" y="142" fill="#00e5ff">C3: 1194 [OK]</text><text x="138" y="142" fill="#ffc400">C4: 1196 [OK]</text><text x="224" y="142" fill="#00e5ff">C5: 1193 [OK]</text>
+  <text x="8" y="154" fill="#e2edf8">10mV </text><text x="52" y="154" fill="#00e5ff">C6: 1198 [OK]</text><text x="138" y="154" fill="#00e5ff">C7: 1201 [OK]</text><text x="224" y="154" fill="#00e5ff">C8: 1197 [OK]</text>
+
+  <line x1="8" y1="164" x2="311" y2="164" stroke="#15263a" stroke-width="0.5" />
+  <text x="8" y="174" fill="#ffc400">-- RESOURCE UTILISATION --</text>
+  <text x="8" y="184" fill="#829ab1">FLASH: 23,304 / 65,536 BYTES (35.6% USED - 42.2 KB FREE)</text>
+  <text x="8" y="194" fill="#829ab1">SRAM :  9,620 / 20,480 BYTES (46.9% USED - 10.8 KB FREE)</text>
+  <text x="8" y="204" fill="#829ab1">FRAME REFRESH: DIRECT GRAM STREAM (ZERO HEAP ALLOCATION)</text>
+
+  <rect x="0" y="222" width="320" height="18" fill="#0b131d" stroke="#2b4e73" stroke-width="0.5" />
+  <text x="8" y="233" fill="#e2edf8">[PRESS OK OR SEL TO RETURN TO MAIN SCOPE]</text>
+</svg>

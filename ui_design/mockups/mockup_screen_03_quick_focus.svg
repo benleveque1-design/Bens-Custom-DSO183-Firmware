@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 240" width="640" height="480" style="background:#060a10;font-family:monospace;font-size:7px;letter-spacing:0.5px;">
+  <!-- Header Bar -->
+  <rect x="0" y="0" width="320" height="18" fill="#0b131d" stroke="#15263a" stroke-width="0.5" />
+  <rect x="2" y="3" width="26" height="12" fill="#00223d" stroke="#00e5ff" stroke-width="0.7" rx="1" />
+  <text x="5" y="12" fill="#00e5ff" font-weight="bold">RUN</text>
+  <text x="36" y="12" fill="#e2edf8">TRIG:AUTO</text>
+  <text x="96" y="12" fill="#ffc400">[/]</text>
+  <text x="118" y="12" fill="#e2edf8">T:+1.25V</text>
+  <text x="183" y="12" fill="#00e5ff" font-weight="bold">TRIG'D</text>
+  <text x="244" y="12" fill="#ffc400">FOCUS:ON</text>
+
+  <!-- Graticule 300x192 -->
+  <rect x="10" y="20" width="300" height="192" fill="#04070c" stroke="#2b4e73" stroke-width="1" />
+  <path d="M 10 116 Q 47.5 50 85 116 T 160 116 T 235 116 T 310 116" fill="none" stroke="#00e5ff" stroke-width="1.2" opacity="0.9" />
+
+  <!-- Compact Bottom Bar -->
+  <rect x="0" y="216" width="320" height="24" fill="#0b131d" stroke="#15263a" stroke-width="0.5" />
+  <text x="4" y="225" fill="#829ab1">CH1: 500mV/div  DC  1X</text>
+  
+  <!-- Active Focus Highlight on Timebase -->
+  <rect x="164" y="217" width="90" height="9" fill="#403000" stroke="#ffc400" stroke-width="0.8" />
+  <text x="167" y="224" fill="#ffc400" font-weight="bold">TB: 1.00ms/d</text>
+  <text x="260" y="225" fill="#829ab1">f: 1.000kHz</text>
+  
+  <text x="4" y="235" fill="#ffc400" font-weight="bold">&gt; ADJ TB: 1.00ms</text>
+  <text x="130" y="235" fill="#e2edf8">[SEL:Next  +/-:Step  OK:Run]</text>
+</svg>
