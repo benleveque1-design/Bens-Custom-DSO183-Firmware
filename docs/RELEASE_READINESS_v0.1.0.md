@@ -45,8 +45,8 @@ require explicit approval from the maintainer.
 ### 1. Clone
 
 ```bash
-git clone https://github.com/benleveque1-design/dso183-firmware.git dso183-firmware
-cd dso183-firmware
+git clone https://github.com/benleveque1-design/Bens-Custom-DSO183-Firmware.git Bens-Custom-DSO183-Firmware
+cd Bens-Custom-DSO183-Firmware
 git checkout v0.1.0        # after tag creation, requires maintainer approval
 ```
 
