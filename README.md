@@ -36,6 +36,28 @@ the person building it. Flash only through the safe page-wise writer
 (`tools/flash/write_image.py`, `AUTHORIZED=1`) — never `st-flash write`, which
 mass-erases the STM32F1 and destroys the stored calibration/settings.
 
+## Bench Photos
+
+Real hardware bench validation photos of the JYE Tech DSO183 running the custom
+firmware (all taken on the single tested instrument: STM32F103 medium-density
+rev A, display controller ID 0x858552):
+
+| Photo | Description |
+|-------|-------------|
+| ![Boot baseline](docs/images/bench/01-boot-baseline.jpg) | Initial boot screen |
+| ![Live trace](docs/images/bench/03-live-trace.jpg) | Live waveform trace on the display |
+| ![Timebase 50 µs/div](docs/images/bench/06-timebase-50us.jpg) | 50 µs/div timebase in operation |
+| ![Trigger test](docs/images/bench/07-trigger-test.jpg) | Trigger event captured |
+| ![Run mode 1 ms/div AUTO](docs/images/bench/10-mode-run-1ms-auto.jpg) | RUN mode, 1 ms/div, AUTO trigger |
+| ![Norm mode 1 ms/div](docs/images/bench/13-mode-norm-1ms.jpg) | NORM trigger mode, 1 ms/div |
+| ![Single mode 1 ms/div](docs/images/bench/14-mode-single-1ms.jpg) | SINGLE trigger mode, 1 ms/div |
+| ![Hold mode 1 ms/div](docs/images/bench/15-mode-hold-1ms.jpg) | HOLD mode, 1 ms/div |
+
+More bench photos (boot screen, span test, final trace, top positions, remote
+verify sequence through all trigger modes, and a choppy-trace investigation
+sequence) are in `docs/images/bench/`. UI design mockups are in
+`docs/images/ui/`.
+
 ## What the firmware provides
 
 | Area | Capability | Verification |
