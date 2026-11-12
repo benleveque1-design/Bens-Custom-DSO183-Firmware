@@ -40,14 +40,16 @@ mass-erases the STM32F1 and destroys the stored calibration/settings.
 
 Real hardware bench validation photos of the JYE Tech DSO183 running the custom
 firmware (all taken on the single tested instrument: STM32F103 medium-density
-rev A, display controller ID 0x858552):
+rev A, display controller ID 0x858552). Captions describe what the photo was
+intended to show; some are part of an investigation sequence and may not show
+the behavior perfectly.
 
 | Photo | Description |
 |-------|-------------|
 | ![Boot baseline](docs/images/bench/01-boot-baseline.jpg) | Initial boot screen |
 | ![Live trace](docs/images/bench/03-live-trace.jpg) | Live waveform trace on the display |
-| ![Timebase 50 µs/div](docs/images/bench/06-timebase-50us.jpg) | 50 µs/div timebase in operation |
-| ![Trigger test](docs/images/bench/07-trigger-test.jpg) | Trigger event captured |
+| ![50 µs/div screen](docs/images/bench/06-timebase-50us.jpg) | 50 µs/div timebase screen (investigation photo) |
+| ![Trigger test](docs/images/bench/07-trigger-test.jpg) | Trigger test photo (investigation sequence) |
 | ![Run mode 1 ms/div AUTO](docs/images/bench/10-mode-run-1ms-auto.jpg) | RUN mode, 1 ms/div, AUTO trigger |
 | ![Norm mode 1 ms/div](docs/images/bench/13-mode-norm-1ms.jpg) | NORM trigger mode, 1 ms/div |
 | ![Single mode 1 ms/div](docs/images/bench/14-mode-single-1ms.jpg) | SINGLE trigger mode, 1 ms/div |
@@ -55,8 +57,22 @@ rev A, display controller ID 0x858552):
 
 More bench photos (boot screen, span test, final trace, top positions, remote
 verify sequence through all trigger modes, and a choppy-trace investigation
-sequence) are in `docs/images/bench/`. UI design mockups are in
-`docs/images/ui/`.
+sequence) are in `docs/images/bench/`.
+
+## UI Design Mockups
+
+UI design mockups from `ui_design/UI_SPECIFICATION.md` — these show the
+intended layout and aesthetic of the firmware's user interface:
+
+| Mockup | Description |
+|--------|-------------|
+| ![Main run](docs/images/ui/01-main-run.png) | Main screen — RUN mode |
+| ![Main hold](docs/images/ui/02-main-hold.png) | Main screen — HOLD mode |
+| ![Quick focus](docs/images/ui/03-quick-focus.png) | Quick-focus overlay |
+| ![Menu settings](docs/images/ui/04-menu-settings.png) | Settings menu |
+| ![System diagnostics](docs/images/ui/05-diagnostics.png) | SYSTEM DIAG screen |
+
+More mockups are in `docs/images/ui/`.
 
 ## What the firmware provides
 
