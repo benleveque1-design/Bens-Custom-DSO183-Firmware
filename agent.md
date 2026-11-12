@@ -89,7 +89,23 @@ If any of the above guard rails are violated or the instrument shows abnormal be
 
 ---
 
-## 📁 Project Structure
+## 🌐 GitHub Repository
+
+**Canonical repository:** https://github.com/benleveque1-design/dso183-firmware
+
+Documentation (README, docs/, LICENSE, CONTRIBUTING.md, CODE_OF_CONDUCT.md,
+SECURITY.md, AI_METHODOLOGY.md, issue/PR templates) is public on GitHub.
+Firmware source code (`app/`, `drivers/`, `linker/`, `startup/`, Makefile,
+tests/, tools/) is **local-only** and is **not** pushed to the public remote
+until explicit approval is granted by the project lead.
+
+Branch strategy:
+- `main` — local only (firmware code + docs), not pushed
+- `docs` — documentation-only branch, pushed to GitHub
+
+Before pushing code to `main` or creating any release, obtain explicit
+approval from the project lead. See `docs/RELEASE_READINESS_v0.1.0.md` for
+release preparation details.
 ```
 dso183-firmware-project/
 ├── agent.md                  ← This file
