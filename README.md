@@ -12,6 +12,11 @@ make its capabilities and internals accessible, and create a foundation that
 other people can build upon. Bug reports, suggestions, fixes and contributions
 are welcome.
 
+> **Repository status:** Documentation and project infrastructure are being
+> published first. Firmware source is still under active development and will
+> be published separately once the current implementation and validation work
+> is ready.
+
 ---
 
 ## Status
@@ -19,9 +24,10 @@ are welcome.
 **Pre-release (v0.1.0 baseline).** The firmware is a working scope core —
 display, acquisition, front-panel decode, trace and the PC link are real and
 have been verified on the bench — but it is not yet a product. Several stock
-features are still missing (RMS/frequency/duty readouts, save/load waveform,
-per-sensitivity calibration applied to the trace, and more), and the five
-fastest timebases are not yet physically usable without equivalent-time
+features are partially implemented or missing: RMS/frequency/duty maths exist
+but only Vpp is shown on the panel; save/load waveform is absent;
+per-sensitivity calibration is stored but not yet applied to the trace. The
+five fastest timebases are not yet physically usable without equivalent-time
 sampling.
 
 The image in `build/` has **not been flashed** by the maintainer from this
