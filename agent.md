@@ -91,7 +91,7 @@ If any of the above guard rails are violated or the instrument shows abnormal be
 
 ## 🌐 GitHub Repository
 
-**Canonical repository:** https://github.com/benleveque1-design/dso183-firmware
+**Canonical repository:** https://github.com/benleveque1-design/Bens-Custom-DSO183-Firmware
 
 Documentation (README, docs/, LICENSE, CONTRIBUTING.md, CODE_OF_CONDUCT.md,
 SECURITY.md, AI_METHODOLOGY.md, issue/PR templates) is public on GitHub.

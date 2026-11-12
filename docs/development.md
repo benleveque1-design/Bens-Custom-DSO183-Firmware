@@ -58,8 +58,8 @@ calibration/settings storage pages and the vendor device record.
 ## 2. Clone and build
 
 ```bash
-git clone <your-fork-url> dso183-firmware
-cd dso183-firmware
+git clone <your-fork-url> Bens-Custom-DSO183-Firmware
+cd Bens-Custom-DSO183-Firmware
 make            # firmware image: build/dso183.bin, .hex, .elf + size report
 ```
 
