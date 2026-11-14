@@ -1,3 +1,5 @@
+![DSO183 Custom Firmware banner](docs/images/repo-banner.png)
+
 # DSO183 custom firmware
 
 Replacement firmware for the JYE Tech DSO183 (18301K) digital storage
