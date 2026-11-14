@@ -24,7 +24,10 @@
 #include "menu.h"
 #include "trigger.h"
 #include "timebase.h"
+#include "ets_phase.h"
+#include "ets_epoch.h"
 #include "settings.h"
+#include "memdiag.h"
 #include "stm32f1xx_hal.h"
 
 #include <stdio.h>
@@ -187,6 +190,7 @@ uint8_t s_trig_slope = 2U; /* 0 rising, 1 falling, 2 auto (shared with menu) */
 static volatile uint16_t s_diag_seq;
 static volatile uint8_t  s_diag_gate_triggered;
 static volatile uint16_t s_diag_hw_index;
+static volatile uint16_t s_diag_hw_count;   /* raw TIM3 count of that capture */
 static volatile uint16_t s_diag_refined_index;
 static volatile uint8_t  s_diag_refined_found;
 static volatile uint8_t  s_diag_fallback; /* 0 refined, 1 HW idx, 2 tail/untriggered */
@@ -207,20 +211,26 @@ static volatile uint8_t  s_diag_trig_mode_snap;
 #define TRIG_SEARCH_LEN    512U   /* software edge-refinement search window */
 
 static uint16_t s_frame[BENCH_WINDOW];
-/* Shared transient scratch (M3 RAM optimisation, -520 B static).
- * Lifetime contract (proven disjoint in acq_bench_poll):
- *   trig_search — valid only inside trig_refine() (filled from acq ring,
- *                 read by trig_scan); dead after trig_refine returns.
- *   tx          — valid only in the streaming branch (link_encode_frame then
- *                 blocking HAL_UART_Transmit via console_write); dead after
- *                 transmit returns.
- * Never live simultaneously. Not ISR/DMA accessible. Do not use tx with
- * non-blocking UART TX (IT/DMA) or retain pointers across polls. Re-audit if
- * lifetimes, UART TX mode, or buffer sizes change. */
+/* Shared transient scratch (M3 RAM optimisation).
+ * Sequential lifetime contract in one acq_bench_poll iteration (main thread,
+ * synchronous, not reentrant, not ISR/DMA accessible; no pointer escapes):
+ *   R (refinement) — trig_search valid only inside trig_refine() (filled from
+ *                    acq ring, consumed by refinement scan); dead on return.
+ *   E (ETS sweep)  — same storage may be reused as a BENCH_WINDOW-uint16_t
+ *                    transient build buffer only inside ets_accumulate(), after
+ *                    trig_refine() has returned and before Phase T; dead on
+ *                    ets_accumulate() return (contents consumed within call).
+ *   T (stream TX)  — tx valid only in the streaming branch after final
+ *                    frame/ETS/averaging work (link_encode_frame then blocking
+ *                    HAL_UART_Transmit via console_write); dead after transmit.
+ * Phases are strictly sequential and never live simultaneously. Re-audit if
+ * lifetimes, call ordering, UART TX mode, or buffer sizes change. */
 static union {
     uint16_t trig_search[TRIG_SEARCH_LEN];
     uint8_t  tx[LINK_OVERHEAD + 2U * BENCH_WINDOW];
 } s_acq_scratch;
+_Static_assert(TRIG_SEARCH_LEN >= BENCH_WINDOW,
+               "ETS tmpbuf alias requires trig_search >= BENCH_WINDOW");
 static uint8_t  s_acq_ok;
 static uint16_t s_means[UI_PLOT_W];
 static uint16_t s_disp[UI_PLOT_W];
@@ -235,6 +245,20 @@ static uint8_t  s_avg_n = 1U;          /* 1(off),2,4,8 */
 static uint32_t s_avg_acc[BENCH_WINDOW];
 static uint8_t  s_avg_count;
 static uint16_t s_avg_len;
+
+/* ETS (equivalent-time sampling) accumulation for REPT timebases 0..4.
+ * The epoch state machine (counter lifecycle, readiness, reconstruction) is
+ * app/ets_epoch.c so it can be host-tested; this file owns only the mapping
+ * of a captured sweep into bins using the Stage B1 phase estimator. */
+/* reset_reason is seeded at boot (see main) so GETV 39 reports
+ * ETS_RESET_INIT before the first sweep, matching the pre-B4.25 boot value.
+ * It is NOT a static initialiser: that would move this ~1.9 KiB aggregate
+ * from .bss into .data and cost the same amount of flash. */
+static struct ets_epoch s_ets;
+/* Compile-time link between the ETS window geometry and the bench frame. */
+_Static_assert(ETS_EPOCH_WINDOW == BENCH_WINDOW, "ETS window must match BENCH_WINDOW");
+_Static_assert(ETS_EPOCH_PRE == BENCH_PRE, "ETS pre-trigger must match BENCH_PRE");
+_Static_assert(ETS_EPOCH_WINDOW * 4U <= 4096U, "ETS sum/cnt RAM stays inside the budget");
 static uint16_t s_frame_len;
 
 /* (a) Wave recall display state. */
@@ -335,6 +359,14 @@ static void avg_reset(void)
 {
     s_avg_count = 0U;
     s_avg_len = 0U;
+}
+
+static void ets_epoch_context(struct ets_epoch_context *ctx)
+{
+    ctx->tb         = acq_timebase_get();
+    ctx->trig_mode  = acq_trigger_mode_get();
+    ctx->trig_slope = s_trig_slope;
+    ctx->trig_level = acq_trigger_level_get();
 }
 
 static uint8_t op_cal_set_offset_mv(int16_t mv)
@@ -473,6 +505,44 @@ static uint16_t op_get_value(uint8_t sub)
     case GETV_DIAG_TRIG_SLOPE:     return (uint16_t)s_diag_trig_slope_snap;
     case GETV_DIAG_TRIG_LEVEL:     return s_diag_trig_level_snap;
     case GETV_DIAG_TRIG_MODE:      return (uint16_t)s_diag_trig_mode_snap;
+    case GETV_MEM_STACK_FREE_NOW:  {
+        uint32_t v = memdiag_stack_free_now();
+        return (v > 65535U) ? 65535U : (uint16_t)v;
+    }
+    case GETV_MEM_STACK_FREE_MIN:  {
+        uint32_t v = memdiag_stack_free_min();
+        return (v > 65535U) ? 65535U : (uint16_t)v;
+    }
+    case GETV_MEM_HEAP_USED:       {
+        uint32_t v = memdiag_heap_used();
+        return (v > 65535U) ? 65535U : (uint16_t)v;
+    }
+    case GETV_MEM_HEAP_HIGHWATER:  {
+        uint32_t v = memdiag_heap_highwater();
+        return (v > 65535U) ? 65535U : (uint16_t)v;
+    }
+    case GETV_MEM_MSP_LOW_WATER:   {
+        /* Raw MSP address (32-bit) exposed as low 16 bits for append-only
+         * 16-bit GETV field; use with derived headroom value. */
+        uint32_t v = memdiag_msp_low_water();
+        return (uint16_t)(v & 0xFFFFU);
+    }
+    case GETV_MEM_MSP_FREE_MIN:    {
+        uint32_t v = memdiag_msp_free_min();
+        return (v > 65535U) ? 65535U : (uint16_t)v;
+    }
+    case GETV_ETS_ACCEPTED_SWEEPS: return ets_epoch_sweeps(&s_ets);
+    case GETV_ETS_REJECTED_SWEEPS: return ets_epoch_rejected(&s_ets);
+    case GETV_ETS_ACCUM_PROGRESS:  return ets_epoch_sweeps(&s_ets);
+    case GETV_ETS_FILLED_BINS:     return ets_epoch_filled(&s_ets);
+    case GETV_ETS_READY:           return (uint16_t)ets_epoch_ready(&s_ets);
+    case GETV_ETS_RESET_REASON:    return ets_epoch_reset_reason(&s_ets);
+    case GETV_ETS_DIAG_SEQ:        return ets_epoch_diag_seq(&s_ets);
+    case GETV_ETS_SRC_B1:          return ets_epoch_src_b1(&s_ets);
+    case GETV_ETS_SRC_QUANTISED:   return ets_epoch_src_quantised(&s_ets);
+    case GETV_ETS_REJECT_UNBOUND:  return ets_epoch_reject_unbound(&s_ets);
+    case GETV_ETS_HW_ROLLOVER:     return ets_epoch_hw_rollover(&s_ets);
+    case GETV_DIAG_HW_COUNT:       return s_diag_hw_count;
     default:               return 0U;
     }
 }
@@ -1250,6 +1320,7 @@ static void ui_plot_margins(uint16_t ground_y, uint16_t trig_y)
 
 static void scope_draw(const struct frame *f)
 {
+    memdiag_msp_sample();
     struct wave_geom  geom = { UI_PLOT_Y, UI_PLOT_H };
     struct wave_range range;
     uint16_t trig_y;
@@ -1626,12 +1697,22 @@ static void ui_diag_draw(void)
                        (unsigned)acq_trigger_level_get());
         diag_print_changed(2U, 182U, b, UI_C_TEXT,
                            s_diag_status_prev[1], sizeof s_diag_status_prev[1]);
+        (void)snprintf(b, sizeof b, "STK n%4u wm%4u msp%4u HP%3u/%3u",
+                       (unsigned)memdiag_stack_free_now(),
+                       (unsigned)memdiag_stack_free_min(),
+                       (unsigned)memdiag_msp_free_min(),
+                       (unsigned)memdiag_heap_used(),
+                       (unsigned)memdiag_heap_highwater());
+        diag_print_changed(2U, 192U, b, UI_C_TEXT,
+                           s_diag_status_prev[2], sizeof s_diag_status_prev[2]);
         (void)snprintf(b, sizeof b, "SPEC DSO183-UI-SPEC-001  %-7s    ",
                        (s_menu.meas_mode == 0U) ? "ALL"
                        : (s_menu.meas_mode == 1U) ? "AV"
                        : (s_menu.meas_mode == 2U) ? "CYCLE" : "ALLDISP");
-        diag_print_changed(2U, 202U, b, UI_C_MUTED,
-                           s_diag_status_prev[2], sizeof s_diag_status_prev[2]);
+        /* Reuse prev[2] cache slot was replaced above; keep spec static on a
+         * non-cached direct print only when changed by full repaint logic not
+         * tracked separately here. */
+        ili9341_print(2U, 202U, b, UI_C_MUTED, UI_C_BG, 1U);
     }
 }
 
@@ -1702,8 +1783,7 @@ static void acq_bench_init(void)
      * acq_init() and acq_set_timebase() already succeeded (early returns
      * above), so the engine is ready - no need to gate on s_acq_ok here. */
     /* Apply timebase if valid: only single-shot-capable entries are usable. */
-    if ((s_settings.timebase_idx >= TIMEBASE_FIRST_SINGLE_SHOT)
-        && (s_settings.timebase_idx < TIMEBASE_COUNT)) {
+    if (s_settings.timebase_idx < TIMEBASE_COUNT) {
         acq_set_timebase(s_settings.timebase_idx);
     }
     /* Apply trigger mode */
@@ -1880,6 +1960,7 @@ static void ladder_refresh(void)
 
 static uint32_t trig_refine(const struct acq_gate *gate, uint8_t *found)
 {
+    memdiag_msp_sample();
     const uint16_t *ring = acq_samples();
     uint16_t ring_size = (uint16_t)acq_sample_count();
     uint16_t n = (uint16_t)(TRIG_REFINE_BACK + TRIG_REFINE_FWD);
@@ -1926,11 +2007,253 @@ static uint32_t trig_refine(const struct acq_gate *gate, uint8_t *found)
         s_last_trig_valid = 1U;
         return s_last_trig_idx;
     }
+    /* Fallback: strict Schmitt refinement can fail when the rearm condition
+     * is never satisfied inside the search window (e.g. trigger level near a
+     * signal extreme so level±hyst is outside the waveform).  The hardware
+     * watchdog already latched the intended edge direction; pick the nearest
+     * simple threshold crossing to the hardware event instead of discarding
+     * refinement entirely. */
+    {
+        uint32_t centre = (TRIG_REFINE_BACK < n) ? TRIG_REFINE_BACK
+                                                 : (uint32_t)(n - 1U);
+        uint16_t lvl = cfg.level;
+        uint32_t best = 0U;
+        uint32_t best_dist = 0xFFFFFFFFUL;
+        int32_t found_simple = -1;
+        uint32_t i;
+        for (i = 1U; i < (uint32_t)n; i++) {
+            uint16_t p = s_acq_scratch.trig_search[i - 1U];
+            uint16_t c = s_acq_scratch.trig_search[i];
+            uint8_t cross = 0U;
+            if (cfg.slope == TRIG_FALLING) {
+                cross = ((p > lvl) && (c <= lvl)) ? 1U : 0U;
+            } else {
+                cross = ((p < lvl) && (c >= lvl)) ? 1U : 0U;
+            }
+            if (cross != 0U) {
+                uint32_t dist = (i >= centre) ? (i - centre) : (centre - i);
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best = i;
+                    found_simple = (int32_t)i;
+                }
+            }
+        }
+        if (found_simple >= 0) {
+            *found = 1U;
+            s_last_trig_idx = ((uint32_t)start + (uint32_t)best) % (uint32_t)ring_size;
+            s_last_trig_valid = 1U;
+            return s_last_trig_idx;
+        }
+    }
     return 0U;
+}
+
+
+/* Accumulate one triggered sweep into the ETS equivalent-time frame.
+ * Returns 1 if a reconstructed frame is ready in s_frame/f, 0 to keep
+ * accumulating.  A sweep contributes only when it can be associated with a
+ * hardware-captured crossing from the same arming generation (B4.27) and the
+ * phase-source selector finds a trustworthy placement:
+ *   - B1 two-sample interpolation when the sampling aperture resolved the
+ *     edge (resolved sine/triangle, wide square);
+ *   - trigger-quantised interval midpoint when the edge completed inside one
+ *     sample interval, so the aperture carries no sub-sample phase;
+ *   - rejection otherwise (no refined edge, unbound capture, level not
+ *     bracketed).
+ * Rejected sweeps update no bin and do not increment the accepted-sweep
+ * count (the target counts accepted sweeps only).  Diagnostics/rejection
+ * (normative): a rejected sweep is a triggered, ETS-eligible sweep that
+ * reaches the accumulation decision point and fails to produce a valid
+ * accepted contribution; untriggered and non-eligible polls are excluded.
+ * The epoch state machine (bounded accepted counter, readiness, failed-attempt
+ * invalidation and gap-safe reconstruction) lives in app/ets_epoch.c. */
+static uint8_t ets_accumulate(const struct acq_gate *gate, uint32_t trig_idx,
+                              uint8_t refined, struct frame *f)
+{
+    memdiag_msp_sample();
+    struct ets_epoch_context ctx;
+    const struct timebase_step *ets_step;
+    const struct timebase_step *hw_step;
+    uint32_t hw_counts;
+    uint32_t ets_counts;
+    enum ets_phase_edge edge;
+    struct ets_source_input src;
+    struct ets_source_result pick;
+    struct acq_trigger_hw hw;
+    uint16_t win_min;
+    uint16_t win_max;
+    uint16_t i;
+    uint16_t n;
+    uint8_t  hw_bound;
+    /* Transient lane for this whole call: the sweep window, then the
+     * reconstruction target.  Never published until it is complete. */
+    uint16_t *const scratch = s_acq_scratch.trig_search;
+
+    if ((gate == NULL) || (gate->triggered == 0U) || (f == NULL)) {
+        return 0U; /* not a triggered ETS-eligible sweep */
+    }
+    if (acq_ets_active() == 0U) {
+        return 0U; /* ETS not active/applicable */
+    }
+
+    ets_epoch_context(&ctx);
+    ets_step = timebase_entry(ctx.tb);
+    hw_step  = timebase_entry(acq_base_timebase_get());
+    if ((ets_step == NULL) || (hw_step == NULL) || (ets_step->single_shot != 0U)) {
+        return 0U; /* ETS not active/applicable */
+    }
+
+    /* Context changes invalidate the epoch before any accumulator is
+     * touched.  Otherwise, a sweep arriving after a completed epoch starts
+     * the next epoch (the completed diagnostics stayed observable until
+     * here), which is what keeps `ready` from outliving its data. */
+    {
+        uint16_t reason = 0U;
+
+        if (ets_epoch_context_differs(&s_ets, &ctx, &reason) != 0U) {
+            ets_epoch_reset(&s_ets, &ctx, reason);
+        } else {
+            ets_epoch_start_sweep(&s_ets);
+        }
+    }
+
+    if (refined == 0U) {
+        ets_epoch_note_rejected(&s_ets);
+        return 0U;
+    }
+
+    /* HW-edge <-> refined-edge association: trig_refine() searches a bounded
+     * window centred on the hardware latch, so a refined index outside that
+     * window cannot be the crossing the watchdog saw.  Reject rather than
+     * place the sweep on an unrelated edge. */
+    {
+        uint32_t back = (uint32_t)(((uint32_t)gate->trigger_index
+                                    + ACQ_SAMPLES - trig_idx) % ACQ_SAMPLES);
+        uint32_t fwd  = (uint32_t)((trig_idx + ACQ_SAMPLES
+                                    - (uint32_t)gate->trigger_index)
+                                   % ACQ_SAMPLES);
+
+        if ((back > TRIG_REFINE_BACK) && (fwd >= TRIG_REFINE_FWD)) {
+            ets_epoch_note_rejected(&s_ets);
+            return 0U;
+        }
+    }
+
+    /* Bind the hardware capture to this arming generation before touching
+     * any bin.  An unbound capture means this sweep cannot be associated
+     * with the event that armed it (rearm, pause/resume, trigger or
+     * timebase change in between). */
+    hw_bound = acq_trigger_hw_read(&hw, gate->arm_generation);
+    if (hw_bound == 0U) {
+        ets_epoch_note_reject_unbound(&s_ets);
+        ets_epoch_note_rejected(&s_ets);
+        return 0U;
+    }
+    if (hw.rollover != 0U) {
+        ets_epoch_note_hw_rollover(&s_ets);
+    }
+
+    hw_counts = ((uint32_t)hw_step->tick_psc + 1U) * ((uint32_t)hw_step->tick_arr + 1U);
+    ets_counts = ((uint32_t)ets_step->tick_psc + 1U) * ((uint32_t)ets_step->tick_arr + 1U);
+    if ((hw_counts == 0U) || (ets_counts == 0U)) {
+        ets_epoch_note_rejected(&s_ets);
+        return 0U;
+    }
+
+    /* Effective edge direction: AUTO is treated as rising (documented semantics). */
+    edge = (s_trig_slope == TRIG_FALLING) ? ETS_PHASE_FALLING : ETS_PHASE_RISING;
+
+    {
+        struct frame tmpf;
+        /* Phase E: reuse s_acq_scratch.trig_search as transient ETS sweep buffer.
+         * R (trig_refine) completed before ets_accumulate(); T (stream TX), if
+         * any, runs after ets_accumulate() returns. Synchronous use only. */
+        uint8_t rc = frame_build(acq_samples(), (uint16_t)acq_sample_count(),
+                                 trig_idx, BENCH_WINDOW, BENCH_PRE,
+                                 scratch, BENCH_WINDOW, &tmpf);
+
+        if ((rc != 0U) || (tmpf.length <= (BENCH_PRE + 1U))) {
+            ets_epoch_note_rejected(&s_ets);
+            return 0U;
+        }
+
+        /* Window rails for the undersampled-edge test.  Bounded by the
+         * window length (320 comparisons per accepted sweep). */
+        n = tmpf.length;
+        win_min = scratch[0];
+        win_max = scratch[0];
+        for (i = 1U; i < n; i++) {
+            if (scratch[i] < win_min) { win_min = scratch[i]; }
+            if (scratch[i] > win_max) { win_max = scratch[i]; }
+        }
+
+        src.y_prev  = scratch[BENCH_PRE - 1U];
+        src.y_curr  = scratch[BENCH_PRE];
+        src.win_min = win_min;
+        src.win_max = win_max;
+        src.level   = ctx.trig_level;
+        src.edge    = edge;
+        src.hw_interval_counts = hw_counts;
+        src.hw_bound = 1U;   /* bound above                            */
+        src.refined  = 1U;   /* checked before frame_build             */
+
+        /* B4.27: B1 when the aperture resolved the edge, trigger-quantised
+         * midpoint when it did not, rejected when neither is trustworthy.
+         * The TIM3 capture is never used as a phase. */
+        pick = ets_source_select(&src);
+        if (pick.source == ETS_SOURCE_REJECTED) {
+            /* Rejected: no fabricated phase, no bin/count changes. */
+            ets_epoch_note_rejected(&s_ets);
+            return 0U;
+        }
+        ets_epoch_note_source(&s_ets, (enum ets_phase_source)pick.source);
+
+        for (i = 0U; i < n; i++) {
+            int32_t bi;
+
+            if (ets_phase_bin_index(i, BENCH_PRE, BENCH_WINDOW,
+                                    hw_counts, ets_counts, pick.phase_q16, &bi) != 0U) {
+                ets_epoch_add(&s_ets, (uint16_t)bi, scratch[i]);
+            }
+        }
+    }
+
+    ets_epoch_note_accepted(&s_ets);
+    if (ets_epoch_target_reached(&s_ets) == 0U) {
+        return 0U;
+    }
+
+    /* Reconstruct into the transient lane, not straight into s_frame: an
+     * attempt that fails coverage (or whose frame cannot be measured) must
+     * leave the previously published frame byte-identical.  Publishing
+     * mid-build is what exposed partially filled frames to the stream and
+     * wave-save consumers in B4.24 (defect D). */
+    if (ets_epoch_reconstruct(&s_ets, scratch) != ETS_EPOCH_READY) {
+        /* Insufficient coverage: the epoch was invalidated (ready=0,
+         * reason=ETS_RESET_INCOMPLETE) rather than left to overflow. */
+        return 0U;
+    }
+
+    if (measure_compute(scratch, BENCH_WINDOW, &f->stats) != 0U) {
+        /* A frame that cannot be measured must not be advertised as ready,
+         * and must not replace the last good frame. */
+        ets_epoch_note_failure(&s_ets);
+        return 0U;
+    }
+
+    memcpy(s_frame, scratch, (size_t)BENCH_WINDOW * sizeof s_frame[0]);
+    s_frame_len = BENCH_WINDOW;
+    f->length = BENCH_WINDOW;
+    f->win.start = 0U;
+    f->win.length = BENCH_WINDOW;
+    f->win.trigger_pos = BENCH_PRE;
+    return 1U;
 }
 
 static void acq_bench_poll(void)
 {
+    memdiag_msp_sample();
     if (s_acq_ok == 0U) {
         return;
     }
@@ -1992,34 +2315,43 @@ static void acq_bench_poll(void)
     {
         uint8_t refined = 0U;
         uint8_t aligned = 0U;
+        uint8_t ets_active = acq_ets_active();
         uint32_t trig_idx = trig_refine(&gate, &refined);
         uint32_t used_idx = 0U;
         uint8_t  fallback = 2U; /* 0 refined, 1 hw index, 2 tail/untriggered */
 
+        /* On ETS ranges the equivalent-time path builds its own transient
+         * window and only publishes s_frame when a reconstruction completes.
+         * Building a raw single sweep into s_frame here first would clobber
+         * the last good reconstructed frame on every accumulating poll (and
+         * expose a raw sweep to wave-save/stream consumers). */
         if (refined != 0U) {
             used_idx = trig_idx;
             fallback = 0U;
-            if (frame_build(acq_samples(), (uint16_t)acq_sample_count(),
-                            trig_idx, BENCH_WINDOW, BENCH_PRE,
-                            s_frame, BENCH_WINDOW, &f) != 0U) {
+            if ((ets_active == 0U)
+                && (frame_build(acq_samples(), (uint16_t)acq_sample_count(),
+                                trig_idx, BENCH_WINDOW, BENCH_PRE,
+                                s_frame, BENCH_WINDOW, &f) != 0U)) {
                 return;
             }
             aligned = 1U;
         } else if (gate.triggered != 0U) {
             used_idx = (uint32_t)gate.trigger_index;
             fallback = 1U;
-            if (frame_build(acq_samples(), (uint16_t)acq_sample_count(),
-                            gate.trigger_index, BENCH_WINDOW, BENCH_PRE,
-                            s_frame, BENCH_WINDOW, &f) != 0U) {
+            if ((ets_active == 0U)
+                && (frame_build(acq_samples(), (uint16_t)acq_sample_count(),
+                                gate.trigger_index, BENCH_WINDOW, BENCH_PRE,
+                                s_frame, BENCH_WINDOW, &f) != 0U)) {
                 return;
             }
             aligned = 1U;
         } else {
             used_idx = (uint32_t)gate.write_index;
             fallback = 2U;
-            if (frame_build_tail(acq_samples(), (uint16_t)acq_sample_count(),
-                                 gate.write_index, BENCH_WINDOW,
-                                 s_frame, BENCH_WINDOW, &f) != 0U) {
+            if ((ets_active == 0U)
+                && (frame_build_tail(acq_samples(), (uint16_t)acq_sample_count(),
+                                     gate.write_index, BENCH_WINDOW,
+                                     s_frame, BENCH_WINDOW, &f) != 0U)) {
                 return;
             }
         }
@@ -2028,6 +2360,7 @@ static void acq_bench_poll(void)
         s_diag_seq++;
         s_diag_gate_triggered = (gate.triggered != 0U) ? 1U : 0U;
         s_diag_hw_index = (uint16_t)gate.trigger_index;
+        s_diag_hw_count = acq_trigger_hw_count();
         s_diag_refined_index = (uint16_t)used_idx;
         s_diag_refined_found = (refined != 0U) ? 1U : 0U;
         s_diag_fallback = fallback;
@@ -2035,6 +2368,18 @@ static void acq_bench_poll(void)
         s_diag_trig_slope_snap = s_trig_slope;
         s_diag_trig_level_snap = acq_trigger_level_get();
         s_diag_trig_mode_snap = (uint8_t)acq_trigger_mode_get();
+
+        /* ETS: accumulate triggered sweeps into equivalent-time frame. */
+        if (ets_active != 0U) {
+            if (gate.triggered != 0U) {
+                if (ets_accumulate(&gate, trig_idx, refined, &f) == 0U) {
+                    return; /* accumulate more sweeps */
+                }
+                aligned = 1U;
+            } else {
+                return; /* wait for triggered sweeps */
+            }
+        }
 
         s_frame_len = f.length;
 
@@ -2287,6 +2632,7 @@ int main(void)
 {
     uint32_t cnt = 0;
 
+    memdiag_stack_paint_early();
     HAL_Init();
     board_free_jtag_pins();
     (void)clock_config();    /* failure sets STATUS_ERR_* and continues */
@@ -2309,6 +2655,12 @@ int main(void)
     tim4_generator_init();   /* 1 kHz 3.3V on PA1(TSIG?)/PA11(SQR)/PA15/PA8/PA12 */
 
     menu_init(&s_menu);
+
+    /* ETS accumulator starts life as an empty epoch whose outcome code is
+     * ETS_RESET_INIT, exactly as the pre-B4.25 boot state reported.  The
+     * bins stay in .bss (they are zero either way); only the reason code is
+     * written here so the aggregate is not pulled into .data. */
+    s_ets.reset_reason = ETS_RESET_INIT;
 
     /* Live acquisition.  It takes ADC1's ownership token for its lifetime;
      * the ladder/diagnostic scans pause it and take the token briefly (see

@@ -85,7 +85,43 @@ GETV_DIAG_TIMEBASE       = 24
 GETV_DIAG_TRIG_SLOPE     = 25
 GETV_DIAG_TRIG_LEVEL     = 26
 GETV_DIAG_TRIG_MODE      = 27
-GETV_COUNT = 28
+# Stage 0 SRAM instrumentation
+GETV_MEM_STACK_FREE_NOW  = 28
+GETV_MEM_STACK_FREE_MIN  = 29
+GETV_MEM_HEAP_USED       = 30
+GETV_MEM_HEAP_HIGHWATER  = 31
+# Stage 0.5 actual MSP low-water
+GETV_MEM_MSP_LOW_WATER   = 32
+GETV_MEM_MSP_FREE_MIN    = 33
+# ETS accumulation diagnostics (volatile, epoch-scoped, read-only)
+GETV_ETS_ACCEPTED_SWEEPS = 34
+GETV_ETS_REJECTED_SWEEPS = 35  # triggered+ETS-eligible, reached decision point, failed acceptance; untriggered/non-eligible excluded
+GETV_ETS_ACCUM_PROGRESS  = 36
+GETV_ETS_FILLED_BINS     = 37
+GETV_ETS_READY           = 38  # 1 only after successful reconstruction READY reset
+GETV_ETS_RESET_REASON    = 39
+GETV_ETS_DIAG_SEQ        = 40  # diagnostic update counter (not seqlock): +1 per logical reject, once per accepted sweep updates, +1 per reset; wraps u16
+# B4.27 trigger-phase source tallies (epoch-scoped, saturating u16)
+GETV_ETS_SRC_B1          = 41  # accepted sweeps placed by two-sample interpolation (resolved edge)
+GETV_ETS_SRC_QUANTISED   = 42  # accepted sweeps placed at the trigger-quantised interval midpoint
+GETV_ETS_REJECT_UNBOUND  = 43  # subset of 35: capture invalid or from an earlier arming generation
+GETV_ETS_HW_ROLLOVER     = 44  # bound captures whose TIM3 count showed >= 1 wrap (diagnostic)
+GETV_DIAG_HW_COUNT       = 45  # raw TIM3 count of last watchdog capture (latency marker, not a phase)
+GETV_COUNT               = 46
+
+# Observable ETS readiness states (diagnostic interpretation):
+# - accumulating: accepted < target, ready == 0
+# - target reached but reconstruction unsuccessful: accepted == target, ready == 0 (no auto reset)
+# - successful reconstruction: ready == 1 after READY reset
+ETS_SWEEPS_TARGET = 16
+
+# ETS reset reason bitmask values (GETV_ETS_RESET_REASON)
+ETS_RESET_INIT              = 0x0020
+ETS_RESET_TB_CHANGE         = 0x0001
+ETS_RESET_TRIG_MODE_CHANGE  = 0x0002
+ETS_RESET_TRIG_SLOPE_CHANGE = 0x0004
+ETS_RESET_TRIG_LEVEL_CHANGE = 0x0008
+ETS_RESET_READY             = 0x0010
 
 TIMEBASE_FIRST_SINGLE_SHOT = 5
 TIMEBASE_COUNT = 24
@@ -207,7 +243,7 @@ def rep_bytes(seq: int, op: int, status: int, value: int) -> bytes:
 def arg_valid(op: int, arg: int) -> bool:
     """Range policy, mirroring app/link_cmd.c link_cmd_arg_valid()."""
     if op == OP_SET_TIMEBASE:
-        return TIMEBASE_FIRST_SINGLE_SHOT <= arg < TIMEBASE_COUNT
+        return 0 <= arg < TIMEBASE_COUNT
     if op == OP_SET_TRIGGER:
         return 0 <= arg <= 4095
     if op == OP_SET_SPAN:
@@ -233,6 +269,99 @@ def arg_valid(op: int, arg: int) -> bool:
     if op in (OP_NOP, OP_RUN, OP_STOP, OP_GET_STATUS):
         return True
     return False
+
+
+# --------------------------------------------------------------------------
+# ETS diagnostics snapshot (host-side, transport-hardened)
+# --------------------------------------------------------------------------
+
+SNAPSHOT_OK = "ok"
+SNAPSHOT_SEQ_MISMATCH = "seq_mismatch"  # persistent sequence mismatch / retry exhaustion
+SNAPSHOT_READ_ERROR = "read_error"      # transport/read exception or malformed value
+
+
+def read_ets_diag_snapshot(read_value_fn, max_retries=8):
+    """Host snapshot procedure for ETS diagnostics (GETV 34-40).
+
+    read_value_fn(subindex) performs one GETV read and should return a u16 value.
+    Procedure: read seq (40); read fields 34-39 in order; read seq again; accept
+    only if both sequence values match. Retries on sequence mismatch up to
+    max_retries attempts. Bounded retry is preserved.
+
+    Returns (snapshot, ok, status):
+      - (fields_dict, True, SNAPSHOT_OK) on a stable snapshot.
+      - ({}, False, SNAPSHOT_SEQ_MISMATCH) when sequence never stabilizes.
+      - ({}, False, SNAPSHOT_READ_ERROR) on transport/read exception or malformed,
+        missing, None, bool, or non-numeric/non-u16 value at any read.
+
+    No partial snapshot is ever reported as valid. No odd/even seqlock;
+    writers/readers are synchronous main-loop in firmware.
+    """
+    ETS_DIAG_FIELDS = (
+        GETV_ETS_ACCEPTED_SWEEPS,
+        GETV_ETS_REJECTED_SWEEPS,
+        GETV_ETS_ACCUM_PROGRESS,
+        GETV_ETS_FILLED_BINS,
+        GETV_ETS_READY,
+        GETV_ETS_RESET_REASON,
+        GETV_ETS_SRC_B1,
+        GETV_ETS_SRC_QUANTISED,
+        GETV_ETS_REJECT_UNBOUND,
+        GETV_ETS_HW_ROLLOVER,
+    )
+
+    def _read_u16(subindex):
+        try:
+            raw = read_value_fn(subindex)
+        except Exception:
+            return None
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            # Accept integers and integral floats only; reject bool/str/object/non-numeric.
+            if isinstance(raw, float):
+                if not raw.is_integer():
+                    return None
+                val = int(raw)
+            elif isinstance(raw, int):
+                val = raw
+            else:
+                return None
+        except Exception:
+            return None
+        if val < 0 or val > 0xFFFF:
+            return None
+        return val & 0xFFFF
+
+    try:
+        retries = int(max_retries)
+    except Exception:
+        retries = 0
+    if retries < 1:
+        retries = 0
+
+    for _ in range(retries):
+        seq0 = _read_u16(GETV_ETS_DIAG_SEQ)
+        if seq0 is None:
+            return {}, False, SNAPSHOT_READ_ERROR
+        values = {}
+        read_failed = False
+        for idx in ETS_DIAG_FIELDS:
+            v = _read_u16(idx)
+            if v is None:
+                read_failed = True
+                break
+            values[idx] = v
+        if read_failed:
+            return {}, False, SNAPSHOT_READ_ERROR
+        seq1 = _read_u16(GETV_ETS_DIAG_SEQ)
+        if seq1 is None:
+            return {}, False, SNAPSHOT_READ_ERROR
+        if seq0 == seq1:
+            values[GETV_ETS_DIAG_SEQ] = seq0
+            return values, True, SNAPSHOT_OK
+    return {}, False, SNAPSHOT_SEQ_MISMATCH
+
 
 
 # --------------------------------------------------------------------------
@@ -321,11 +450,12 @@ def offline_failures() -> list:
         pass
 
     # Argument policy boundaries (mirrors link_cmd_arg_valid).
-    check("tb 4 invalid", not arg_valid(OP_SET_TIMEBASE, 4))
+    # ETS timebases 0..4 are valid (equivalent-time); engine handles them.
+    check("tb 0 valid", arg_valid(OP_SET_TIMEBASE, 0))
+    check("tb 4 valid", arg_valid(OP_SET_TIMEBASE, 4))
     check("tb 5 valid", arg_valid(OP_SET_TIMEBASE, 5))
     check("tb 23 valid", arg_valid(OP_SET_TIMEBASE, 23))
     check("tb 24 rejected", not arg_valid(OP_SET_TIMEBASE, 24))
-    check("tb 27 invalid", not arg_valid(OP_SET_TIMEBASE, 27))
     check("tr 4095 valid", arg_valid(OP_SET_TRIGGER, 4095))
     check("tr 4096 invalid", not arg_valid(OP_SET_TRIGGER, 4096))
     check("sp 16 valid", arg_valid(OP_SET_SPAN, 16))
@@ -352,6 +482,115 @@ def offline_failures() -> list:
     check("getv count invalid", not arg_valid(OP_GET_VALUE, GETV_COUNT))
     check("slope 2 valid", arg_valid(OP_SET_TRIG_SLOPE, 2))
     check("slope 3 invalid", not arg_valid(OP_SET_TRIG_SLOPE, 3))
+
+    # ETS diagnostics GETV indices (append-only from 34) and decoding constants.
+    check("getv ets accepted idx", GETV_ETS_ACCEPTED_SWEEPS == 34)
+    check("getv ets rejected idx", GETV_ETS_REJECTED_SWEEPS == 35)
+    check("getv ets accum idx", GETV_ETS_ACCUM_PROGRESS == 36)
+    check("getv ets filled idx", GETV_ETS_FILLED_BINS == 37)
+    check("getv ets ready idx", GETV_ETS_READY == 38)
+    check("getv ets reset reason idx", GETV_ETS_RESET_REASON == 39)
+    check("getv ets diag seq idx", GETV_ETS_DIAG_SEQ == 40)
+    check("getv ets src b1 idx", GETV_ETS_SRC_B1 == 41)
+    check("getv ets src quantised idx", GETV_ETS_SRC_QUANTISED == 42)
+    check("getv ets reject unbound idx", GETV_ETS_REJECT_UNBOUND == 43)
+    check("getv ets hw rollover idx", GETV_ETS_HW_ROLLOVER == 44)
+    check("getv diag hw count idx", GETV_DIAG_HW_COUNT == 45)
+    check("getv count 46", GETV_COUNT == 46)
+    for idx in (GETV_ETS_ACCEPTED_SWEEPS, GETV_ETS_REJECTED_SWEEPS,
+                GETV_ETS_ACCUM_PROGRESS, GETV_ETS_FILLED_BINS,
+                GETV_ETS_READY, GETV_ETS_RESET_REASON, GETV_ETS_DIAG_SEQ,
+                GETV_ETS_SRC_B1, GETV_ETS_SRC_QUANTISED,
+                GETV_ETS_REJECT_UNBOUND, GETV_ETS_HW_ROLLOVER,
+                GETV_DIAG_HW_COUNT):
+        check("getv ets valid %d" % idx, arg_valid(OP_GET_VALUE, idx))
+    check("getv 33 still valid", arg_valid(OP_GET_VALUE, 33))
+    check("getv 46 invalid", not arg_valid(OP_GET_VALUE, 46))
+    c_ets = cmd_bytes(12, OP_GET_VALUE, GETV_ETS_DIAG_SEQ)
+    d_ets = cmd_parse(c_ets)
+    check("getv ets diag seq roundtrip", d_ets == {"seq": 12, "op": OP_GET_VALUE, "arg": GETV_ETS_DIAG_SEQ})
+    # Reset reason bitmask/code values
+    check("ets reset init", ETS_RESET_INIT == 0x0020)
+    check("ets reset tb", ETS_RESET_TB_CHANGE == 0x0001)
+    check("ets reset mode", ETS_RESET_TRIG_MODE_CHANGE == 0x0002)
+    check("ets reset slope", ETS_RESET_TRIG_SLOPE_CHANGE == 0x0004)
+    check("ets reset level", ETS_RESET_TRIG_LEVEL_CHANGE == 0x0008)
+    check("ets reset ready", ETS_RESET_READY == 0x0010)
+    check("ets sweeps target", ETS_SWEEPS_TARGET == 16)
+
+    # ETS_DIAG_SEQ is a diagnostic update counter (u16 wrap), not an odd/even seqlock.
+    seq = 0
+    for _ in range(3):
+        seq = (seq + 1) & 0xFFFF  # logical rejected outcome / accepted update / reset
+    check("ets seq increments", seq == 3)
+    seq = 0xFFFF
+    seq = (seq + 1) & 0xFFFF
+    check("ets seq wraps u16", seq == 0)
+
+    # Snapshot retry: accept only if seq before==after; reject on change; bounded retry.
+    state = {GETV_ETS_DIAG_SEQ: 7, 34: 1, 35: 2, 36: 1, 37: 10, 38: 0, 39: ETS_RESET_TB_CHANGE,
+             41: 3, 42: 2, 43: 0, 44: 5}
+    snap, ok, st = read_ets_diag_snapshot(lambda idx: state[idx])
+    check("snapshot stable accepted", ok and st == SNAPSHOT_OK and snap[GETV_ETS_DIAG_SEQ] == 7 and snap[GETV_ETS_ACCEPTED_SWEEPS] == 1)
+    check("snapshot includes source tallies", ok and snap[GETV_ETS_SRC_B1] == 3 and snap[GETV_ETS_SRC_QUANTISED] == 2 and snap[GETV_ETS_HW_ROLLOVER] == 5)
+    state2 = {GETV_ETS_DIAG_SEQ: 1, 34: 0, 35: 0, 36: 0, 37: 0, 38: 0, 39: ETS_RESET_INIT,
+              41: 0, 42: 0, 43: 0, 44: 0}
+    def always_change(idx):
+        if idx == GETV_ETS_DIAG_SEQ:
+            state2[GETV_ETS_DIAG_SEQ] = (state2[GETV_ETS_DIAG_SEQ] + 1) & 0xFFFF
+        return state2[idx]
+    snap2, ok2, st2 = read_ets_diag_snapshot(always_change, max_retries=3)
+    check("snapshot persistent seq mismatch", (not ok2) and st2 == SNAPSHOT_SEQ_MISMATCH and snap2 == {})
+    # changes between attempts then stabilizes => retry succeeds
+    state3 = {GETV_ETS_DIAG_SEQ: 5, 34: 2, 35: 1, 36: 2, 37: 20, 38: 0, 39: 0,
+              41: 2, 42: 0, 43: 1, 44: 3, "reads": 0}
+    def change_once_between(idx):
+        if idx == GETV_ETS_DIAG_SEQ:
+            state3["reads"] += 1
+            # first group: seq0 sees 5, mutate before seq1 so group fails; later groups stable at 6
+            if state3["reads"] == 2:
+                state3[GETV_ETS_DIAG_SEQ] = 6
+        return state3[idx]
+    snap3, ok3, st3 = read_ets_diag_snapshot(change_once_between, max_retries=4)
+    check("snapshot retry then accept", ok3 and st3 == SNAPSHOT_OK and snap3[GETV_ETS_DIAG_SEQ] == 6)
+
+    # Transport/read failures and malformed values must not return partial valid snapshot.
+    base = {GETV_ETS_DIAG_SEQ: 9, 34: 1, 35: 1, 36: 1, 37: 2, 38: 0, 39: 0,
+            41: 1, 42: 0, 43: 0, 44: 0}
+
+    def exc_initial(idx):
+        if idx == GETV_ETS_DIAG_SEQ:
+            raise IOError("timeout")
+        return base[idx]
+    snap, ok, st = read_ets_diag_snapshot(exc_initial)
+    check("exception initial seq -> read_error", (not ok) and st == SNAPSHOT_READ_ERROR and snap == {})
+
+    def exc_field(idx):
+        if idx == GETV_ETS_ACCEPTED_SWEEPS:
+            raise ValueError("transport")
+        return base[idx]
+    snap, ok, st = read_ets_diag_snapshot(exc_field)
+    check("exception field read -> read_error", (not ok) and st == SNAPSHOT_READ_ERROR and snap == {})
+
+    calls = {"n": 0}
+    def exc_final(idx):
+        if idx == GETV_ETS_DIAG_SEQ:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("late")
+        return base[idx]
+    snap, ok, st = read_ets_diag_snapshot(exc_final)
+    check("exception final seq -> read_error", (not ok) and st == SNAPSHOT_READ_ERROR and snap == {})
+
+    for bad in (None, "1", object(), True, -1, 65536, 1.5, float("nan")):
+        bstate = dict(base)
+        bstate[GETV_ETS_FILLED_BINS] = bad
+        snap, ok, st = read_ets_diag_snapshot(lambda idx, bs=bstate: bs[idx])
+        check("malformed/non-numeric %r -> read_error" % (bad,), (not ok) and st == SNAPSHOT_READ_ERROR and snap == {})
+
+    # retry exhaustion distinct from read error
+    snap, ok, st = read_ets_diag_snapshot(always_change, max_retries=1)
+    check("retry exhaustion bounded", (not ok) and st == SNAPSHOT_SEQ_MISMATCH and snap == {})
 
     return fails
 

@@ -38,7 +38,7 @@
 /* Opcodes.  Arguments are uint16 little-endian on the wire. */
 enum link_op {
     LINK_OP_NOP          = 0x00U,  /* arg ignored                           */
-    LINK_OP_SET_TIMEBASE = 0x01U,  /* arg = index TIMEBASE_FIRST_SINGLE_SHOT..(TIMEBASE_COUNT-1) */
+    LINK_OP_SET_TIMEBASE = 0x01U,  /* arg = index 0..(TIMEBASE_COUNT-1), 0-4 ETS */
     LINK_OP_SET_TRIGGER  = 0x02U,  /* arg = trigger level 0..4095           */
     LINK_OP_SET_SPAN     = 0x03U,  /* arg = display span in counts 16..4095 */
     LINK_OP_RUN          = 0x04U,  /* arg ignored, resume the sweep         */
@@ -90,8 +90,60 @@ enum link_getv {
     GETV_DIAG_TRIG_SLOPE    = 25U,  /* 0 rise, 1 fall, 2 auto */
     GETV_DIAG_TRIG_LEVEL    = 26U,  /* trigger level */
     GETV_DIAG_TRIG_MODE     = 27U,  /* 0 AUTO, 1 NORM, 2 SINGLE */
-    GETV_COUNT       = 28U
+    /* Stage 0 SRAM instrumentation (read-only). */
+    GETV_MEM_STACK_FREE_NOW = 28U,  /* bytes free below MSP to stack bottom */
+    GETV_MEM_STACK_FREE_MIN = 29U,  /* min-ever free bytes (watermark)       */
+    GETV_MEM_HEAP_USED      = 30U,  /* current heap bytes used               */
+    GETV_MEM_HEAP_HIGHWATER = 31U,  /* peak heap bytes used                  */
+    /* Stage 0.5 actual MSP low-water (raw minimum MSP). */
+    GETV_MEM_MSP_LOW_WATER  = 32U,  /* raw minimum MSP observed (addr, low 16 not needed? full via 2 reads not avail; 16-bit field) */
+    GETV_MEM_MSP_FREE_MIN   = 33U,  /* derived headroom: min MSP - stack bottom (bytes) */
+    /* ETS accumulation diagnostics (volatile, epoch-scoped, read-only). */
+    GETV_ETS_ACCEPTED_SWEEPS = 34U, /* accepted sweeps contributing in current epoch (0..ETS_EPOCH_SWEEPS_TARGET;
+                                      * reaching the target always ends the epoch, so the value never wraps) */
+    GETV_ETS_REJECTED_SWEEPS = 35U, /* rejected sweeps in current epoch (saturating u16): triggered, ETS-eligible,
+                                      * reached accumulation decision point, and failed to produce a valid accepted
+                                      * contribution. Untriggered/non-eligible polls excluded. */
+    GETV_ETS_ACCUM_PROGRESS  = 36U, /* current accumulation progress = accepted sweeps in current epoch
+                                      * (0..ETS_EPOCH_SWEEPS_TARGET) */
+    GETV_ETS_FILLED_BINS     = 37U, /* bins with count>0 in current epoch (0..320) */
+    GETV_ETS_READY           = 38U, /* 1 only while the active frame is the completed reconstruction of the
+                                      * current epoch (sweeps==target and filled>=80). Cleared when a new epoch
+                                      * starts accumulating, when the context changes, and when a reconstruction
+                                      * attempt fails. The last outcome remains visible in GETV 39. */
+    GETV_ETS_RESET_REASON    = 39U, /* last accumulator reset/outcome bitmask/code (see ETS_RESET_*) */
+    GETV_ETS_DIAG_SEQ        = 40U, /* diagnostic update counter (u16, wraps): increments on each logical
+                                      * rejected-sweep outcome, once after each accepted sweep's diagnostic
+                                      * updates complete, and on every ETS epoch reset. Snapshot: read seq,
+                                      * read fields 34-39, read seq again; accept only if seq values match
+                                      * (retry with bounded count). Not an odd/even seqlock. */
+    /* B4.27 trigger-phase source tallies (epoch-scoped, saturating u16). */
+    GETV_ETS_SRC_B1          = 41U, /* accepted sweeps in the current epoch placed by two-sample
+                                      * interpolation on an aperture-resolved edge */
+    GETV_ETS_SRC_QUANTISED   = 42U, /* accepted sweeps placed at the trigger-quantised midpoint of
+                                      * the sample interval (edge not resolved by the aperture) */
+    GETV_ETS_REJECT_UNBOUND  = 43U, /* subset of GETV 35: sweeps rejected because the hardware
+                                      * capture was invalid or from an earlier arming generation */
+    GETV_ETS_HW_ROLLOVER     = 44U, /* bound captures in the current epoch whose TIM3 count read
+                                      * below the conversion-complete offset, i.e. at least one timer
+                                      * wrap occurred. Diagnostic only: the latency model assumes
+                                      * exactly one wrap, not a phase */
+    GETV_DIAG_HW_COUNT       = 45U, /* raw TIM3 count latched by the watchdog ISR for the last
+                                      * recorded acquisition, coherent with GETV 20/21. Latency
+                                      * marker, not a sub-sample phase: used by the hardware
+                                      * campaign to test the timing model (P1/P2) */
+    GETV_COUNT               = 46U
 };
+
+/* ETS_RESET_REASON values/bitmask (GETV_ETS_RESET_REASON). */
+#define ETS_RESET_INIT             0x0020U  /* initialization/boot epoch */
+#define ETS_RESET_TB_CHANGE        0x0001U  /* timebase changed */
+#define ETS_RESET_TRIG_MODE_CHANGE 0x0002U  /* trigger mode changed */
+#define ETS_RESET_TRIG_SLOPE_CHANGE 0x0004U /* trigger slope changed */
+#define ETS_RESET_TRIG_LEVEL_CHANGE 0x0008U /* trigger level changed */
+#define ETS_RESET_READY            0x0010U  /* successful ETS reconstruction/readiness (epoch completed) */
+#define ETS_RESET_INCOMPLETE       0x0040U  /* target reached but reconstruction invalid (coverage < 25%
+                                             * or downstream measurement failure); epoch was invalidated */
 
 struct link_cmd {
     uint8_t  seq;

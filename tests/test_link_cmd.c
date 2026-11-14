@@ -75,8 +75,9 @@ int main(void)
     CHECK(link_rep_parse(buf, sizeof buf, NULL, &status, &value) == 0U);
 
     /* --- argument policy ------------------------------------------------- */
-    CHECK(link_cmd_arg_valid(LINK_OP_SET_TIMEBASE, 0U) == 0U);
-    CHECK(link_cmd_arg_valid(LINK_OP_SET_TIMEBASE, 4U) == 0U);
+    /* ETS ranges 0..4 now valid; 0..23 accepted. */
+    CHECK(link_cmd_arg_valid(LINK_OP_SET_TIMEBASE, 0U) == 1U);
+    CHECK(link_cmd_arg_valid(LINK_OP_SET_TIMEBASE, 4U) == 1U);
     CHECK(link_cmd_arg_valid(LINK_OP_SET_TIMEBASE, 5U) == 1U);
     CHECK(link_cmd_arg_valid(LINK_OP_SET_TIMEBASE, 23U) == 1U);
     CHECK(link_cmd_arg_valid(LINK_OP_SET_TIMEBASE, 24U) == 0U);

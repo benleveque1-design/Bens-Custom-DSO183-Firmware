@@ -77,7 +77,7 @@ vpath %.s $(sort $(dir $(ASM_SOURCES)))
 # production modules it exercises link alongside it.
 TEST_LIBS     := app/ladder.c app/acq_stats.c app/diag.c app/trigger.c app/timebase.c \
                  app/tim3.c app/ui.c \
-                 app/acq_window.c app/adc_owner.c app/measure.c app/frame.c app/waveform.c app/bench.c app/cal.c app/render.c app/continuity.c app/link.c app/link_cmd.c app/link_host.c fonts/glyph.c fonts/glcdfont.c app/settings.c app/crc16.c app/cal_table.c app/runstate.c app/wave_store.c
+                 app/acq_window.c app/adc_owner.c app/measure.c app/frame.c app/waveform.c app/bench.c app/cal.c app/render.c app/continuity.c app/link.c app/link_cmd.c app/link_host.c fonts/glyph.c fonts/glcdfont.c app/settings.c app/crc16.c app/cal_table.c app/runstate.c app/wave_store.c app/ets_phase.c app/ets_epoch.c app/ets_source.c
 TEST_BINARIES := $(patsubst tests/%.c,$(BUILD)/%,$(wildcard tests/test_*.c))
 
 # ---- rules -----------------------------------------------------------------

@@ -10,6 +10,7 @@
  */
 #include "status.h"
 #include "acq.h"
+#include "memdiag.h"
 #include "menu.h"
 #include "stm32f1xx_hal.h"
 
@@ -19,16 +20,19 @@
  * sequences, because neither hook touches the IWDG and neither blocks. */
 void DMA1_Channel1_IRQHandler(void)
 {
+    memdiag_msp_sample();
     acq_isr_dma();
 }
 
 void ADC1_2_IRQHandler(void)
 {
+    memdiag_msp_sample();
     acq_isr_adc();
 }
 
 void SysTick_Handler(void)
 {
+    memdiag_msp_sample();
     HAL_IncTick();
     status_heartbeat_inc();
     menu_button_tick();          /* 1 ms front-panel sampler (debounced) */

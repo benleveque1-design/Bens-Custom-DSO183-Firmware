@@ -128,9 +128,8 @@ uint8_t link_cmd_arg_valid(uint8_t op, uint16_t arg)
 {
     switch (op) {
     case LINK_OP_SET_TIMEBASE:
-        /* Indices 0..4 are equivalent-time only; the engine rejects them. */
-        return ((arg >= TIMEBASE_FIRST_SINGLE_SHOT)
-                && (arg < TIMEBASE_COUNT)) ? 1U : 0U;
+        /* Indices 0..4 are equivalent-time (ETS); engine handles them. */
+        return (arg < TIMEBASE_COUNT) ? 1U : 0U;
     case LINK_OP_SET_TRIGGER:
         return (arg <= 4095U) ? 1U : 0U;   /* 12-bit ADC counts              */
     case LINK_OP_SET_SPAN:

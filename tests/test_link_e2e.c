@@ -100,11 +100,11 @@ int main(void)
     roundtrip(3U, LINK_OP_SET_TIMEBASE, 23U, &status, &value);
     CHECK(status == LINK_ST_OK && g_timebase == 23U);
 
-    /* The five equivalent-time-only entries are refused, not applied. */
+    /* ETS (equivalent-time) entries 0..4 are now accepted. */
     g_timebase = 0xEEU;
     roundtrip(4U, LINK_OP_SET_TIMEBASE, 4U, &status, &value);
-    CHECK(status == LINK_ST_BAD_ARG && value == 0U);
-    CHECK(g_timebase == 0xEEU);
+    CHECK(status == LINK_ST_OK && value == 0U);
+    CHECK(g_timebase == 4U);
 
     /* A value that does not fit a uint8 must not wrap into a legal index:
      * 261 is 0x0105, so a blind cast would select timebase 5. */

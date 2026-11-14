@@ -20,6 +20,8 @@
 #include "tim3_hw.h"
 #include "timebase.h"
 #include "board_iwdg.h"
+#include "memdiag.h"
+#include "ets_source.h"
 
 #include "stm32f1xx_hal.h"
 
@@ -38,8 +40,26 @@ static uint8_t  s_snap_valid;             /* 0 until the first snapshot   */
 
 static volatile uint8_t  s_event;         /* 0 none, 1 triggered, 2 timeout */
 static volatile uint32_t s_trigger_index; /* latched watchdog position      */
+
+/* Trigger-phase capture (B4.27).  The ISR is the only writer; a sequence
+ * counter guards the multi-field update so the reader can never mix fields
+ * from two captures.  `s_arm_generation` identifies the arming that produced
+ * a capture: it changes on every rearm, timebase/trigger change, pause and
+ * resume, so a stale capture cannot be bound to a later sweep. */
+struct acq_hw_capture {
+    volatile uint32_t trigger_index;
+    volatile uint32_t count;
+    volatile uint32_t generation;
+    volatile uint32_t valid;
+    volatile uint32_t rollover;
+};
+static volatile uint32_t s_hw_seq;
+static struct acq_hw_capture s_hw_capture;
+static uint32_t          s_arm_generation = 1U; /* 0 is never used        */
+
 static uint8_t           s_inited;
-static uint8_t           s_timebase;      /* index pacing TIM3 */
+static uint8_t           s_timebase;      /* logical timebase index          */
+static uint8_t           s_hw_timebase;   /* index actually pacing TIM3      */
 static uint8_t           s_ring_primed;   /* 1 once the ring has wrapped     */
 static uint16_t          s_resume_pos;    /* ring pos at the last DMA resume */
 /* Mode policy lives here; the hardware event is still the analog watchdog.
@@ -54,6 +74,15 @@ static uint8_t           s_trig_slope_hw;  /* 0 rising, 1 falling (AUTO->0) */
 _Static_assert(ACQ_SAMPLES <= 1024U,      "DMA buffer over the RAM budget");
 _Static_assert(ACQ_SAMPLES <= 65535U,     "DMA CNDTR is 16-bit");
 _Static_assert(ACQ_TRIGGER_LEVEL <= 4095U, "trigger level beyond 12 bits");
+
+/* ADC conversion-complete offset on the ETS base range: SMP 1.5 cycles ->
+ * 14 ADC clocks at PCLK2/6, one ADC clock being 6 TIM3 counts = 84 counts.
+ * Used only to label a captured TIM3 count as having wrapped at least once
+ * (B4.27).  It is diagnostic, never a phase, and is never added to or
+ * subtracted from the ETS time base. */
+#define ACQ_CONV_COMPLETE_COUNTS 84U
+_Static_assert(ACQ_CONV_COMPLETE_COUNTS == TIMEBASE_MIN_SS_COUNTS,
+               "conversion-complete offset must match the ETS base range");
 /* acq_cycle() never feeds the IWDG, so a timeout at or above the watchdog
  * period would turn a clean ACQ_TIMEOUT into a reset. */
 _Static_assert(ACQ_MAX_WAIT_MS < ACQ_IWDG_TIMEOUT_MS,
@@ -63,6 +92,32 @@ _Static_assert(ACQ_MAX_WAIT_MS < ACQ_IWDG_TIMEOUT_MS,
 _Static_assert(ACQ_SIGNAL_CHANNEL != LADDER_CH_SEN1, "signal ch clashes with SEN1");
 _Static_assert(ACQ_SIGNAL_CHANNEL != LADDER_CH_SEN2, "signal ch clashes with SEN2");
 _Static_assert(ACQ_SIGNAL_CHANNEL != LADDER_CH_CPL,  "signal ch clashes with CPL");
+
+/* --------------------------------------------------- trigger-phase capture */
+
+/* A new arming generation.  Every event that can change what a sub-sample
+ * phase means - or that discards the sweep it belonged to - bumps it, so a
+ * capture from before the event can never be bound to a later sweep. */
+static void arm_generation_bump(void)
+{
+    s_arm_generation++;
+    if (s_arm_generation == 0U) {
+        s_arm_generation = 1U;      /* 0 is reserved for "never armed"    */
+    }
+}
+
+/* Invalidate the stored capture without racing the ISR writer.  The critical
+ * section is a handful of instructions and is only entered between cycles. */
+static void hw_capture_invalidate(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    s_hw_seq++;
+    s_hw_capture.valid = 0U;
+    s_hw_seq++;
+    __set_PRIMASK(primask);
+}
 
 /* ------------------------------------------------------------ wait helpers */
 
@@ -136,7 +191,7 @@ static uint16_t acq_latest_sample(void)
  * is fed so a legitimate multi-second wait cannot reset the instrument. */
 static void wait_trigger_rearm(void)
 {
-    uint32_t tick_ns = timebase_tick_ns(s_timebase);
+    uint32_t tick_ns = timebase_tick_ns(s_hw_timebase);
     uint32_t budget_ms;
     uint32_t t0;
 
@@ -276,6 +331,7 @@ static void adc_quiesce(void)
 
 void acq_isr_dma(void)
 {
+    memdiag_msp_sample();
     uint32_t isr = DMA1->ISR;
 
     if ((isr & DMA_ISR_TCIF1) != 0U) {
@@ -290,6 +346,7 @@ void acq_isr_dma(void)
 
 void acq_isr_adc(void)
 {
+    memdiag_msp_sample();
     /* Not running?  Then this interrupt is not ours: leave the ADC
      * registers completely alone (disarming AWDIE or clearing SR here
      * would silently break whatever else is using the ADC - e.g. the
@@ -305,16 +362,32 @@ void acq_isr_adc(void)
      * at ~530 kS/s would bury the SysTick feeder). */
     ADC1->CR1 &= ~ADC_CR1_AWDIE;
     ADC1->SR   = 0U;
-    /* Write position = ACQ_SAMPLES - remaining CNDTR (the watchdog fired on
-     * the conversion before the one being written now, so this lands one
-     * index after the triggering sample - see acq_gate::trigger_index). */
+    /* Capture the TIM3 count and the ring position as one coherent,
+     * sequence-guarded record.  The count is a latency marker (conversion
+     * completion + ISR entry), not a sub-sample phase: see B4.27
+     * TIMING_INVESTIGATION.md.  It is used only to bind this capture to the
+     * sweep being accumulated and to report a timer wrap. */
     {
+        uint32_t cnt  = TIM3->CNT;
         uint32_t ndtr = DMA1_Channel1->CNDTR & 0xFFFFU;
         uint32_t idx  = (ndtr <= ACQ_SAMPLES) ? (ACQ_SAMPLES - ndtr) : 0U;
 
+        s_hw_seq++;
+        s_hw_capture.count         = cnt;
+        s_hw_capture.trigger_index = idx;
+        s_hw_capture.generation    = s_arm_generation;
+        s_hw_capture.rollover      =
+            ets_source_capture_rolled(cnt, ACQ_CONV_COMPLETE_COUNTS);
+        s_hw_capture.valid         = 1U;
+        s_hw_seq++;
+
+        /* Write position = ACQ_SAMPLES - remaining CNDTR (the watchdog fired
+         * on the conversion before the one being written now, so this lands
+         * one index after the triggering sample - see
+         * acq_gate::trigger_index). */
         if (s_event == 0U) {
             s_trigger_index = idx;
-            s_event = 1U;                 /* the event main() is waiting for */
+            s_event = 1U;             /* the event main() is waiting for */
         }
     }
     status_acq_triggers_inc();
@@ -342,7 +415,13 @@ static uint8_t wait_cndtr_changed(uint32_t timeout_ms)
 }
 
 /* Re-arm DMA and TIM3 after a freeze.  The ADC's regular-group setup is
- * untouched, so this is just the post-pause half of acq_resume(). */
+ * untouched, so this is just the post-pause half of acq_resume().
+ * TIM3 must be reprogrammed with s_hw_timebase, not s_timebase: on an ETS
+ * range the logical index (0..4) is finer than the ADC can convert, while
+ * the hardware paces at TIMEBASE_FIRST_SINGLE_SHOT.  Using the logical
+ * index here made the sample interval ADC-limited instead of timer-defined
+ * and contradicted acq_base_timebase_get(), which the ETS phase/bin model
+ * relies on (B4.25 defect A). */
 static enum acq_status pacing_resume(void)
 {
     struct tim3_config cfg;
@@ -352,7 +431,7 @@ static enum acq_status pacing_resume(void)
     ADC1->CR2 |= ADC_CR2_DMA;
     s_resume_pos = (uint16_t)((ACQ_SAMPLES
                      - (DMA1_Channel1->CNDTR & 0xFFFFU)) % ACQ_SAMPLES);
-    if ((tim3_config_for(s_timebase, &cfg) != 0U)
+    if ((tim3_config_for(s_hw_timebase, &cfg) != 0U)
         || (tim3_hw_start(&cfg) != 0U)) {
         status_acq_hw_errors_inc();
         return ACQ_HW_ERROR;
@@ -364,34 +443,39 @@ enum acq_status acq_set_timebase(uint8_t index)
 {
     struct tim3_config cfg;
     const struct timebase_step *step;
+    uint8_t hw_index;
 
-    if (tim3_config_for(index, &cfg) != 0U) {
-        return ACQ_PARAM;
-    }
-    /* Reject the equivalent-time-only steps: TIM3 would be programmed to a
-     * tick shorter than one ADC conversion, so samples would repeat.  The
-     * engine has no interleaved/repetitive acquisition to fall back on. */
     step = timebase_entry(index);
-    if ((step == NULL) || (step->single_shot == 0U)) {
+    if (step == NULL) {
         return ACQ_PARAM;
     }
     if (s_inited == 0U) {
         return ACQ_NOT_INITED;
     }
+    /* REPT (ETS) ranges 0..4: hardware paces at the fastest single-shot
+     * rate (50 us/div, index 5) while the logical timebase selects the
+     * equivalent-time scale.  Single-shot ranges pace directly. */
+    if (step->single_shot == 0U) {
+        hw_index = (uint8_t)TIMEBASE_FIRST_SINGLE_SHOT;
+    } else {
+        hw_index = index;
+    }
+    if (tim3_config_for(hw_index, &cfg) != 0U) {
+        return ACQ_PARAM;
+    }
     tim3_hw_stop();                       /* stop pacing while it changes */
-    /* Match the ADC aperture to the sample interval: the faster ranges need
-     * a shorter sampling time or a conversion cannot finish within one
-     * trigger period (50 us/div requires SMP=1.5).  Apply while pacing is
-     * stopped so the change takes effect before the next conversion. */
     adc_channel_sample_time(ACQ_SIGNAL_CHANNEL,
-                            (uint32_t)timebase_smp_code(index));
-    /* The timer keeps its counter running into the new period only until
-     * the next update; restart both so the first new interval is full. */
+                            (uint32_t)timebase_smp_code(hw_index));
     if (tim3_hw_start(&cfg) != 0U) {      /* 0 = started, 1 = bad cfg */
         status_acq_hw_errors_inc();
         return ACQ_HW_ERROR;
     }
     s_timebase = index;
+    s_hw_timebase = hw_index;
+    /* The sample interval changed: any capture taken under the old interval
+     * is not comparable with the new one. */
+    arm_generation_bump();
+    hw_capture_invalidate();
     return ACQ_OK;
 }
 
@@ -476,6 +560,7 @@ enum acq_status acq_init(void)
                                              : (uint8_t)ACQ_DEFAULT_TIMEBASE;
 
         s_inited = 1U;
+        s_hw_timebase = (uint8_t)ACQ_DEFAULT_TIMEBASE;
         if (acq_set_timebase(resume_tb) != ACQ_OK) {
             s_inited = 0U;
             status_acq_hw_errors_inc();
@@ -514,6 +599,8 @@ enum acq_status acq_init(void)
     s_event    = 0U;
     s_trigger_index = 0U;
     s_ring_primed = 0U;   /* dma_start() emptied the ring */
+    arm_generation_bump(); /* a re-init invalidates every earlier capture */
+    hw_capture_invalidate();
     return rc;
 }
 
@@ -542,6 +629,10 @@ enum acq_status acq_pause(void)
     ADC1->CR2 = (ADC1->CR2 & ~ADC_CR2_EXTSEL)
               | ((uint32_t)ACQ_EXTSEL_SWSTART << ADC_CR2_EXTSEL_Pos);
     (void)adc_owner_release(ADC_OWNER_ACQ);
+    /* The ladder read is a gap in the sample stream: nothing captured before
+     * it may be associated with a sweep after it. */
+    arm_generation_bump();
+    hw_capture_invalidate();
     return ACQ_OK;
 }
 
@@ -558,11 +649,11 @@ enum acq_status acq_resume(void)
 
     /* Undo everything the ladder read changed: the channel, the sample
      * time (the reader leaves 239.5 cycles behind) and the trigger, which
-     * pause() had to disable.  Restore the aperture for the active timebase
-     * (fast ranges need SMP=1.5 to fit within one sample interval). */
+     * pause() had to disable.  Restore the aperture for the hardware
+     * timebase actually pacing TIM3 (fast ETS ranges map to index 5). */
     ADC1->SQR3 = ACQ_SIGNAL_CHANNEL;
     adc_channel_sample_time(ACQ_SIGNAL_CHANNEL,
-                            (uint32_t)timebase_smp_code(s_timebase));
+                            (uint32_t)timebase_smp_code(s_hw_timebase));
     ADC1->CR2 = (ADC1->CR2 & ~ADC_CR2_EXTSEL)
               | ((uint32_t)ACQ_EXTSEL_TIM3_TRGO << ADC_CR2_EXTSEL_Pos);
     ADC1->CR2 |= ADC_CR2_EXTTRIG;
@@ -572,12 +663,12 @@ enum acq_status acq_resume(void)
     ADC1->CR2 |= ADC_CR2_DMA;
     s_resume_pos = (uint16_t)((ACQ_SAMPLES
                      - (DMA1_Channel1->CNDTR & 0xFFFFU)) % ACQ_SAMPLES);
-    if ((tim3_config_for(s_timebase, &cfg) != 0U)
+    if ((tim3_config_for(s_hw_timebase, &cfg) != 0U)
         || (tim3_hw_start(&cfg) != 0U)) {
         return ACQ_HW_ERROR;
     }
     {
-        uint32_t tick = timebase_tick_ns(s_timebase);
+        uint32_t tick = timebase_tick_ns(s_hw_timebase);
         uint32_t start_ms = (tick / 1000000U) * 2U + 20U;
 
         if (start_ms > 250U) { start_ms = 250U; }
@@ -585,17 +676,29 @@ enum acq_status acq_resume(void)
             return ACQ_HW_ERROR;
         }
     }
+    /* Acquisition restarted after the ladder gap: earlier captures are not
+     * comparable with what follows. */
+    arm_generation_bump();
+    hw_capture_invalidate();
     return ACQ_OK;
 }
 
 enum acq_status acq_set_trigger_level(uint16_t level)
 {
+    uint16_t new_level;
+
     if (s_inited == 0U) {
         return ACQ_NOT_INITED;
     }
+    new_level = (level > 4095U) ? 4095U : level;
+    if (new_level != s_trig_level) {
+        /* The ETS crossing model depends on the level. */
+        arm_generation_bump();
+        hw_capture_invalidate();
+    }
     /* Remember the applied level for the trigger marker (the ADC registers
      * hold the hysteresis-expanded, one-sided band, not the user's level). */
-    s_trig_level = (level > 4095U) ? 4095U : level;
+    s_trig_level = new_level;
     /* The F1 watchdog fires on out-of-band samples; the band is one-sided
      * so only the requested edge direction can fire. */
     apply_trigger_band();
@@ -615,6 +718,9 @@ enum acq_status acq_set_trigger_slope(uint8_t slope)
     slope = (slope == 1U) ? 1U : 0U;
     if (slope != s_trig_slope_hw) {
         s_trig_slope_hw = slope;
+        /* Crossing direction changed: the ETS edge association follows. */
+        arm_generation_bump();
+        hw_capture_invalidate();
         apply_trigger_band();
     }
     return ACQ_OK;
@@ -632,6 +738,10 @@ enum acq_status acq_set_trigger_mode(uint8_t mode)
     if (mode == (uint8_t)TRIG_MODE_SINGLE) {
         s_trig.armed = 1U;      /* entering SINGLE means "capture one" */
     }
+    /* Mode changes alter the arming policy: earlier captures belong to an
+     * earlier arm. */
+    arm_generation_bump();
+    hw_capture_invalidate();
     return ACQ_OK;
 }
 
@@ -641,6 +751,8 @@ enum acq_status acq_trigger_arm(void)
         return ACQ_NOT_INITED;
     }
     trig_fsm_arm(&s_trig);
+    arm_generation_bump();
+    hw_capture_invalidate();
     return ACQ_OK;
 }
 
@@ -648,6 +760,7 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
                           struct acq_gate *out)
 {
     uint32_t t0;
+    uint32_t gen = s_arm_generation;
     uint8_t  triggered = 0U;
 
     if (s_inited == 0U) {
@@ -673,6 +786,7 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
     out->trigger_index = 0U;
     out->write_index   = s_snap_pos;
     out->duration_ms   = 0U;
+    out->arm_generation = gen;
 
     /* SINGLE already took its one window: stay parked without touching the
      * sample path, so the displayed capture cannot be overwritten. */
@@ -685,7 +799,7 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
      * index holds a real sample.  The DMA runs continuously; this is only a
      * first-boot condition. */
     if (s_ring_primed == 0U) {
-        uint32_t tick = timebase_tick_ns(s_timebase);
+        uint32_t tick = timebase_tick_ns(s_hw_timebase);
         uint64_t need_ms = ((uint64_t)ACQ_SAMPLES * (uint64_t)tick)
                          / 1000000ULL + 50ULL;
         uint32_t prime_ms = (need_ms > 7000ULL) ? 7000U : (uint32_t)need_ms;
@@ -716,7 +830,7 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
      * exist before the window is placed, or its pre-trigger part reads the
      * gap/discontinuity. */
     {
-        uint32_t tick = timebase_tick_ns(s_timebase);
+        uint32_t tick = timebase_tick_ns(s_hw_timebase);
         uint64_t need_ms = ((uint64_t)TRIG_PRE_TRIGGER * (uint64_t)tick)
                          / 1000000ULL + 20ULL;
         uint32_t pre_ms = (need_ms > 4000ULL) ? 4000U : (uint32_t)need_ms;
@@ -749,6 +863,10 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
     /* Rearm the one-shot watchdog: disarm, clear the stale flag, reset the
      * event, arm again.  Order matters: the flag must be CLEAN before the
      * interrupt is enabled, otherwise arming latches an old crossing. */
+    arm_generation_bump();
+    hw_capture_invalidate();
+    gen = s_arm_generation;
+    out->arm_generation = gen;
     ADC1->CR1 &= ~ADC_CR1_AWDIE;
     ADC1->SR   = 0U;
     s_event        = 0U;
@@ -812,7 +930,7 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
              * and slower give up and re-capture at a random phase. */
             uint32_t post_ms = ACQ_POST_FILL_MS;
             {
-                uint32_t tick = timebase_tick_ns(s_timebase);
+                uint32_t tick = timebase_tick_ns(s_hw_timebase);
                 uint64_t need = ((uint64_t)post_samples * (uint64_t)tick)
                               / 1000000ULL + 50ULL;
 
@@ -940,5 +1058,68 @@ uint16_t acq_trigger_level_get(void)
 uint8_t acq_trigger_mode_get(void)
 {
     return s_trig.mode;
+}
+
+uint8_t acq_ets_active(void)
+{
+    const struct timebase_step *st = timebase_entry(s_timebase);
+    return ((st != NULL) && (st->single_shot == 0U)) ? 1U : 0U;
+}
+
+uint8_t acq_base_timebase_get(void)
+{
+    return s_hw_timebase;
+}
+
+uint8_t acq_trigger_hw_read(struct acq_trigger_hw *out,
+                            uint32_t expected_generation)
+{
+    struct acq_trigger_hw snap;
+    uint8_t attempt;
+
+    if (out == NULL) {
+        return 0U;
+    }
+    /* The ISR writes at most once per arming, so a torn read is already
+     * implausible; the bounded retry makes it a non-event even then. */
+    for (attempt = 0U; attempt < 3U; attempt++) {
+        uint32_t s0 = s_hw_seq;
+
+        if ((s0 & 1U) != 0U) {
+            continue;                    /* update in progress            */
+        }
+        snap.trigger_index = s_hw_capture.trigger_index;
+        snap.count         = s_hw_capture.count;
+        snap.generation    = s_hw_capture.generation;
+        snap.valid         = (uint8_t)s_hw_capture.valid;
+        snap.rollover      = (uint8_t)s_hw_capture.rollover;
+        if (s_hw_seq != s0) {
+            continue;                    /* changed underneath us         */
+        }
+        snap.bound    = ets_source_capture_bound(expected_generation,
+                                                 snap.generation, snap.valid);
+        snap.reserved = 0U;
+        *out = snap;
+        return snap.bound;
+    }
+    memset(out, 0, sizeof *out);
+    return 0U;
+}
+
+uint32_t acq_trigger_phase_ns(void)
+{
+    struct acq_trigger_hw hw;
+
+    /* Compatibility accessor for the raw capture.  This is a latency marker,
+     * not a sub-sample phase - see acq_trigger_hw_read(). */
+    (void)acq_trigger_hw_read(&hw, s_arm_generation);
+    return (hw.count * 125U) / 8U;
+}
+
+uint16_t acq_trigger_hw_count(void)
+{
+    /* Single aligned 32-bit store in the ISR, single load here: the low 16
+     * bits are always a complete value (count < 100 on every ETS range). */
+    return (uint16_t)(s_hw_capture.count & 0xFFFFU);
 }
 

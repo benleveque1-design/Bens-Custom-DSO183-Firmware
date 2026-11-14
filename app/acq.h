@@ -174,6 +174,30 @@ struct acq_gate {
                               * both paths and used for the untriggered
                               * AUTO tail window. */
     uint32_t duration_ms;    /* ms from arm to latch/timeout */
+    uint32_t arm_generation; /* arming generation this cycle belongs to.
+                              * A hardware trigger-phase capture is only
+                              * bindable to the window when its generation
+                              * matches this value (B4.27). */
+};
+
+/* Coherent copy of the ADC-watchdog trigger-phase capture (B4.27).
+ *
+ * `count` is TIM3->CNT as read at the watchdog ISR.  It is NOT a sub-sample
+ * phase: it measures the ADC conversion completion plus ISR entry latency,
+ * `(conversion_complete + latency) mod interval` (B4.27 timing
+ * investigation).  It exists so a capture can be bound to a sweep and so a
+ * timer wrap can be reported; never feed it to the ETS bin mapper.
+ *
+ * `bound` is 1 only when the capture was marked valid and its generation
+ * matches the generation passed to acq_trigger_hw_read(). */
+struct acq_trigger_hw {
+    uint32_t trigger_index;  /* ring position latched with the count        */
+    uint32_t count;          /* TIM3->CNT at ISR entry                      */
+    uint32_t generation;     /* arming generation the capture belongs to    */
+    uint8_t  valid;          /* 1 = a capture was written since the last arm */
+    uint8_t  rollover;       /* 1 = count < conversion-complete offset      */
+    uint8_t  bound;          /* 1 = valid and generation-matched            */
+    uint8_t  reserved;
 };
 
 /* Initialise/enable ADC1 + DMA1_Ch1 and START the continuous sample path.
@@ -255,6 +279,33 @@ enum acq_status acq_resume(void);
 uint8_t  acq_timebase_get(void);
 uint16_t acq_trigger_level_get(void);
 uint8_t  acq_trigger_mode_get(void);
+
+/* ETS (equivalent-time) support for REPT timebases (indices 0..4).
+ * When a REPT timebase is selected, hardware runs at a fast base rate and
+ * multiple triggered sweeps are interleaved.  acq_ets_active() reports
+ * whether the current logical timebase uses ETS.  acq_trigger_phase_ns()
+ * returns the raw TIM3 count of the last trigger event expressed in
+ * nanoseconds - a latency marker, not a phase (see acq_trigger_hw_read). */
+uint8_t  acq_ets_active(void);
+uint8_t  acq_base_timebase_get(void);
+uint32_t acq_trigger_phase_ns(void);
+
+/* Read a coherent, sequence-guarded copy of the last trigger-phase capture.
+ * Returns 1 and fills *out when the capture is valid AND its arm generation
+ * equals expected_generation; otherwise returns 0 with out->bound = 0 (the
+ * other fields still describe the last capture, for diagnostics).  The
+ * expected generation is struct acq_gate::arm_generation. */
+uint8_t acq_trigger_hw_read(struct acq_trigger_hw *out,
+                            uint32_t expected_generation);
+
+/* Raw TIM3 count of the most recent hardware capture (diagnostic only).
+ *
+ * This is the same latency marker as acq_trigger_hw_read()->count, exposed as
+ * a single aligned 16-bit read so the diagnostic snapshot can publish it
+ * without a seqlock.  It is NOT a sub-sample phase; the hardware campaign uses
+ * it to test the timing model (B4.27 prediction P1) - never feed it to the
+ * ETS bin mapper. */
+uint16_t acq_trigger_hw_count(void);
 
 
 /* The sample buffer (ACQ_SAMPLES 12-bit counts, big-endian-in-16? - no:

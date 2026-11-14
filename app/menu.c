@@ -252,10 +252,10 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
     case MENU_TIMEBASE: {
         int32_t idx = (int32_t)m->timebase_idx + dir;
 
-        if (idx < (int32_t)TIMEBASE_FIRST_SINGLE_SHOT) {
+        if (idx < 0) {
             idx = (int32_t)TIMEBASE_COUNT - 1;
         } else if (idx >= (int32_t)TIMEBASE_COUNT) {
-            idx = (int32_t)TIMEBASE_FIRST_SINGLE_SHOT;
+            idx = 0;
         }
         if (acq_set_timebase((uint8_t)idx) == ACQ_OK) {
             m->timebase_idx = (uint8_t)idx;
@@ -498,10 +498,10 @@ static void focus_step(struct menu *m, int dir, uint32_t now)
     switch ((enum menu_focus)(m->focus % FOCUS_COUNT)) {
     case FOCUS_TIMEBASE: {
         int32_t idx = (int32_t)m->timebase_idx + dir;
-        if (idx < (int32_t)TIMEBASE_FIRST_SINGLE_SHOT) {
+        if (idx < 0) {
             idx = (int32_t)TIMEBASE_COUNT - 1;
         } else if (idx >= (int32_t)TIMEBASE_COUNT) {
-            idx = (int32_t)TIMEBASE_FIRST_SINGLE_SHOT;
+            idx = 0;
         }
         if (acq_set_timebase((uint8_t)idx) == ACQ_OK) {
             m->timebase_idx = (uint8_t)idx;
@@ -585,8 +585,7 @@ void menu_init(struct menu *m)
     runstate_init();
 
     if (settings_load(&s) == 0U) {
-        if ((s.timebase_idx >= TIMEBASE_FIRST_SINGLE_SHOT)
-            && (s.timebase_idx < TIMEBASE_COUNT)) {
+        if (s.timebase_idx < TIMEBASE_COUNT) {
             m->timebase_idx = s.timebase_idx;
         }
         if (s.trigger_mode <= (uint8_t)TRIG_MODE_SINGLE) {
