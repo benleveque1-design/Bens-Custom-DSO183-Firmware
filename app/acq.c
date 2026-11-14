@@ -185,11 +185,15 @@ static uint16_t acq_latest_sample(void)
  * watchdog on the first conversion, which is exactly the random-phase
  * window this engine used to display.  The budget is a few display
  * divisions of wall time, so a periodic signal gets at least one chance to
- * return to the waiting side; if it never does (DC, GND, level outside the
- * signal) the caller still proceeds and the timeout/AUTO path takes over.
- * Extremely slow timebases poll at 1 ms instead of spinning, and the IWDG
- * is fed so a legitimate multi-second wait cannot reset the instrument. */
-static void wait_trigger_rearm(void)
+ * return to the waiting side.
+ *
+ * Returns 1 when the rearm condition was observed (sample on the far side of
+ * the hysteresis band), 0 when the budget expired without it.  A timed-out
+ * wait does NOT mean it is safe to arm: the caller must only enable AWDIE
+ * when the current sample is inside the watchdog window, or the first
+ * conversion after arming can latch immediately at an arbitrary phase
+ * (producing a misaligned frame). */
+static uint8_t acq_wait_rearm(void)
 {
     uint32_t tick_ns = timebase_tick_ns(s_hw_timebase);
     uint32_t budget_ms;
@@ -198,9 +202,7 @@ static void wait_trigger_rearm(void)
     /* A few divisions of time is enough for a periodic signal to revisit the
      * waiting side.  Keep this short: acq_cycle blocks the whole UI, so a
      * large budget (especially on slow timebases, or when the level is outside
-     * the signal) makes buttons and waveform updates feel frozen.  If the
-     * budget expires we still arm and proceed - at worst the cycle may latch a
-     * less-stable phase, which is far better than stalling the instrument. */
+     * the signal) makes buttons and waveform updates feel frozen. */
     budget_ms = (uint32_t)(((uint64_t)tick_ns * 64ULL) / 1000000ULL) + 2U;
     if (budget_ms > 20U) {
         budget_ms = 20U;
@@ -232,14 +234,22 @@ static void wait_trigger_rearm(void)
                 ready = (s <= lo) ? 1U : 0U;   /* rising: wait until low    */
             }
             if (ready != 0U) {
-                return;
+                return 1U;
             }
             if (tick_ns > 100000U) {
                 ms_delay(1U);
             }
         }
-        return;
+        return 0U;
     }
+}
+
+/* Compatibility wrapper.  Callers that do not need the readiness result must
+ * still avoid arming when the watchdog window is not satisfied (see
+ * acq_cycle). */
+static void wait_trigger_rearm(void)
+{
+    (void)acq_wait_rearm();
 }
 
 /* ------------------------------------------------------ board-level config */
@@ -857,21 +867,53 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
     /* Arm only when the input is on the waiting side of the one-sided band.
      * Arming while it is already past the threshold latches the watchdog on
      * the first conversion, giving the random-phase window this engine used
-     * to show.  Bounded, and harmless when it expires (DC/GND/timeout). */
-    wait_trigger_rearm();
+     * to show.
+     *
+     * Even if the hysteresis rearm wait times out, we must not enable AWDIE
+     * while the current sample is outside the watchdog window: that would
+     * fire immediately at an arbitrary phase (mid-plateau latch), which the
+     * software refinement cannot recover from if the true edge is outside its
+     * search window.  In that case skip arming for this cycle and let the
+     * mode policy handle it as an untriggered/timeout attempt. */
+    {
+        uint8_t rearm_ready = acq_wait_rearm();
+        uint8_t arm_safe = rearm_ready;
 
-    /* Rearm the one-shot watchdog: disarm, clear the stale flag, reset the
-     * event, arm again.  Order matters: the flag must be CLEAN before the
-     * interrupt is enabled, otherwise arming latches an old crossing. */
-    arm_generation_bump();
-    hw_capture_invalidate();
-    gen = s_arm_generation;
-    out->arm_generation = gen;
-    ADC1->CR1 &= ~ADC_CR1_AWDIE;
-    ADC1->SR   = 0U;
-    s_event        = 0U;
-    s_trigger_index = 0U;
-    ADC1->CR1 |= ADC_CR1_AWDIE;
+        if (arm_safe == 0U) {
+            uint16_t s = acq_latest_sample();
+
+            if (s_trig_slope_hw == 1U) {
+                /* Falling band [level-hyst, 4095]: safe inside window. */
+                uint32_t lo = ((uint32_t)s_trig_level > ACQ_TRIGGER_HYST)
+                            ? ((uint32_t)s_trig_level - ACQ_TRIGGER_HYST) : 0U;
+                arm_safe = (s >= lo) ? 1U : 0U;
+            } else {
+                /* Rising band [0, level+hyst]: safe inside window. */
+                uint32_t hi = (uint32_t)s_trig_level + ACQ_TRIGGER_HYST;
+                if (hi > 4095U) { hi = 4095U; }
+                arm_safe = (s <= hi) ? 1U : 0U;
+            }
+        }
+
+        /* Rearm the one-shot watchdog: disarm, clear the stale flag, reset the
+         * event, arm again.  Order matters: the flag must be CLEAN before the
+         * interrupt is enabled, otherwise arming latches an old crossing. */
+        arm_generation_bump();
+        hw_capture_invalidate();
+        gen = s_arm_generation;
+        out->arm_generation = gen;
+        ADC1->CR1 &= ~ADC_CR1_AWDIE;
+        ADC1->SR   = 0U;
+        s_event        = 0U;
+        s_trigger_index = 0U;
+        if (arm_safe != 0U) {
+            ADC1->CR1 |= ADC_CR1_AWDIE;
+        }
+        /* If unsafe to arm (sample outside window), leave AWDIE disabled:
+         * the trigger-wait poll below will expire normally and the mode
+         * policy (AUTO fallback / NORM-SINGLE hold) applies without a
+         * spurious mid-plateau latch. */
+    }
 
     t0 = HAL_GetTick();
     {

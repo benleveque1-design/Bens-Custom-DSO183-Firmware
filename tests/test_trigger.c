@@ -4,6 +4,8 @@
  * (see Makefile TEST_LIBS).  Property list follows the header contract.
  */
 #include "trigger.h"
+#include "frame.h"
+#include "acq_window.h"
 
 #include <stdio.h>
 
@@ -239,6 +241,110 @@ static int test_window_start(void)
     return 0;
 }
 
+/* Regression characterization for the 50 us/div rising-edge misalignment
+ * mechanism (B4.33 Stage A).  At 1.5625 us/sample a 1 kHz 50% duty signal
+ * has 640 samples/cycle.  If a triggered capture is anchored to a mid-
+ * plateau index (e.g. AWD latched while the signal was already above the
+ * rising window), refinement cannot find the rising edge (it lies outside
+ * the 176-sample search window) and placing the frame at that index
+ * produces a high-plateau window with a falling crossing near index 287
+ * and no rising crossing - matching the reported hardware symptom.
+ * Refinement and frame placement must still behave correctly when given the
+ * correct edge index. */
+static int test_rising_50us_rearm_sensitive_scenario(void)
+{
+    enum { RING = 1024, WIN = 320, PRE = 96, PERIOD = 640, FALL = 320,
+           BACK = 128, FWD = 48, HYST = 8 };
+    static uint16_t ring[RING];
+    static uint16_t dst[WIN];
+    struct trig_cfg cfg = { .level = 970U, .hyst_counts = HYST,
+                            .slope = TRIG_RISING };
+    uint16_t search[BACK + FWD];
+    uint32_t i, start, centre, rise_idx, hw_correct, hw_late;
+    int32_t edge;
+    struct frame f;
+    uint8_t rc;
+
+    for (i = 0U; i < RING; i++) {
+        ring[i] = ((i % PERIOD) < (uint32_t)FALL) ? 881U : 1055U;
+    }
+    rise_idx = 320U; /* first sample at/after rising edge */
+    hw_correct = rise_idx + 1U;      /* one past triggering sample */
+    hw_late = rise_idx + 129U;       /* mid-plateau (spurious latch) */
+
+    /* Correct HW anchor: refinement finds the rising edge. */
+    start = (hw_correct + RING - BACK) % RING;
+    for (i = 0U; i < (uint32_t)(BACK + FWD); i++) {
+        search[i] = ring[(start + i) % RING];
+    }
+    centre = BACK;
+    edge = trig_scan_nearest(search, (uint32_t)(BACK + FWD), centre, &cfg);
+    CHECK(edge >= 0);
+    CHECK(((start + (uint32_t)edge) % RING) == rise_idx);
+
+    /* Mid-plateau anchor: no rising crossing in window -> refinement fails. */
+    start = (hw_late + RING - BACK) % RING;
+    for (i = 0U; i < (uint32_t)(BACK + FWD); i++) {
+        search[i] = ring[(start + i) % RING];
+    }
+    edge = trig_scan_nearest(search, (uint32_t)(BACK + FWD), centre, &cfg);
+    CHECK(edge == -1);
+    {
+        /* Simple rising-threshold fallback (as in trig_refine) also fails. */
+        uint32_t best = 0U, best_dist = 0xFFFFFFFFUL;
+        int32_t found_simple = -1;
+
+        for (i = 1U; i < (uint32_t)(BACK + FWD); i++) {
+            uint16_t p = search[i - 1U], c = search[i];
+
+            if ((p < cfg.level) && (c >= cfg.level)) {
+                uint32_t dist = (i >= centre) ? (i - centre) : (centre - i);
+
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best = i;
+                    found_simple = (int32_t)i;
+                }
+            }
+        }
+        (void)best;
+        CHECK(found_simple == -1);
+    }
+
+    /* Falling back to the mid-plateau HW index reproduces the symptom:
+     * no rising crossing, falling crossing at index 287. */
+    rc = frame_build(ring, RING, hw_late, WIN, PRE, dst, WIN, &f);
+    CHECK(rc == 0U);
+    CHECK(f.win.trigger_pos == PRE);
+    {
+        uint8_t nr = 0U, nf = 0U;
+        uint16_t nf_idx = 0U;
+
+        for (i = 1U; i < WIN; i++) {
+            if ((dst[i - 1U] < cfg.level) && (dst[i] >= cfg.level)) { nr++; }
+            if ((dst[i - 1U] > cfg.level) && (dst[i] <= cfg.level)) {
+                nf++;
+                nf_idx = (uint16_t)i;
+            }
+        }
+        CHECK(nr == 0U);
+        CHECK(nf == 1U);
+        CHECK(nf_idx == 287U);
+        CHECK(dst[0] == 1055U);
+        CHECK(dst[286] == 1055U);
+        CHECK(dst[287] == 881U);
+    }
+
+    /* A correctly rearmed rising edge remains detectable in a valid window. */
+    start = (hw_correct + RING - BACK) % RING;
+    for (i = 0U; i < (uint32_t)(BACK + FWD); i++) {
+        search[i] = ring[(start + i) % RING];
+    }
+    edge = trig_scan_nearest(search, (uint32_t)(BACK + FWD), centre, &cfg);
+    CHECK(edge == 127);
+    return 0;
+}
+
 int main(void)
 {
     int failures = 0;
@@ -254,6 +360,7 @@ int main(void)
     failures += test_fsm_modes();
     failures += test_fsm_action();
     failures += test_window_start();
+    failures += test_rising_50us_rearm_sensitive_scenario();
 
     if (failures == 0) {
         printf("trigger: all tests passed\n");
