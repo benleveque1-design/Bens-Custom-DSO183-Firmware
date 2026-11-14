@@ -12,29 +12,13 @@ make its capabilities and internals accessible, and create a foundation that
 other people can build upon. Bug reports, suggestions, fixes and contributions
 are welcome.
 
-> **Repository status:** Documentation and project infrastructure are being
-> published first. Firmware source is still under active development and will
-> be published separately once the current implementation and validation work
-> is ready.
-
----
-
 ## Status
 
-**Pre-release (v0.1.0 baseline).** The firmware is a working scope core —
-display, acquisition, front-panel decode, trace and the PC link are real and
-have been verified on the bench — but it is not yet a product. Several stock
-features are partially implemented or missing: RMS/frequency/duty maths exist
-but only Vpp is shown on the panel; save/load waveform is absent;
-per-sensitivity calibration is stored but not yet applied to the trace. The
-five fastest timebases are not yet physically usable without equivalent-time
-sampling.
+**Pre-release (active development).** Firmware source, host tests, and tooling are published in this repository (`main`). The firmware is a working scope core — display, acquisition, front-panel decode, trace and the PC link are real and have been verified on the bench — but it is **not yet a product**. Several stock features are partially implemented or missing: RMS/frequency/duty maths exist but only Vpp is shown on the panel; save/load waveform is absent; per-sensitivity calibration is stored but not yet applied to the trace. The five fastest timebases are not yet physically usable without equivalent-time sampling.
 
-The image in `build/` has **not been flashed** by the maintainer from this
-exact tree; physical flash and bench validation remain the responsibility of
-the person building it. Flash only through the safe page-wise writer
-(`tools/flash/write_image.py`, `AUTHORIZED=1`) — never `st-flash write`, which
-mass-erases the STM32F1 and destroys the stored calibration/settings.
+**Current instrument state (B4.32, 2026-11-14, single tested instrument):** a pinned candidate (**build_seq 12066**, `dso183.bin` 39,988 B, SHA-256 `983e6f6c9f0108663ffcf96abc832dc253c0f686f1e41c514bba0864de3c2c35`) implementing `dual_b1_bound` ETS trigger-phase integration (B4.27) was deployed via `tools/flash_cycle.py` (page-wise, page 0 last, verified) and independently verified on-device (`build_seq==12066`, responsive). Staged TB0–TB5 hardware validation was executed under B2 Amendment A + B-REC: deployment/identity verified; TB4 fast-undersampled square met coverage/ready in captured evidence (fill 128, ready); TB2/TB3 did not reach the 80-bin gate in captured windows; **TB0/TB1 fast aperture-unresolved square cases are coverage-limited** (80-bin metric reported, no PASS/FAIL gate per B-REC, no fabricated coverage); resolved-edge sine/triangle cases were not tested in that run (no signal source); normal/stream/control checks showed no regression in tested scope. Detailed campaign evidence/logs are maintained locally (gitignored `evidence/`); see `agent.md` for the project status summary and guardrails.
+
+**Your responsibility:** images in `build/` are gitignored and rebuilds/flashes from your checkout are your responsibility. Bench conditions, instrument revision, and results may differ. Flash only through safe, page-wise, read-back-verified tooling with explicit authorisation — **never `st-flash write`** (STM32F1 mass-erase risk to reserved calibration/settings/device data).
 
 ## Bench Photos
 

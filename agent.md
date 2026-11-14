@@ -79,8 +79,8 @@ If guard rails are violated or behaviour is abnormal (no splash, garbled display
 
 ## GitHub / upload notes
 - **Canonical repository:** https://github.com/benleveque1-design/Bens-Custom-DSO183-Firmware
-- Prior policy recorded in this repo: firmware source on `main` treated as local-only pending explicit approval (with docs pushed via `docs`). **Follow project-lead direction for what/where to push.**
-- Before upload/push: ensure `build/`, `evidence/`, `logs/`, local configs/secrets are not committed (see `.gitignore`); review diffs; obtain explicit approval as required.
+- **`main` is published on GitHub** and contains firmware source, tests, docs, and tooling. `docs` branch remains available (historical docs-only branch). Keep the repository reflecting the actual project state.
+- Before upload/push: ensure `build/`, `evidence/`, `logs/`, local configs/secrets are not committed (see `.gitignore`); review diffs; follow project-lead direction for releases/tags.
 
 ## Contact & authorization
 - Project lead must grant explicit authorisation (e.g. `AUTHORIZED=1` / campaign approval) before any device programming.
