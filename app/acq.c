@@ -15,6 +15,7 @@
 #include "acq.h"
 #include "ladder.h"
 #include "acq_window.h"
+#include "acq_handoff.h"
 #include "trigger.h"
 #include "adc_owner.h"
 #include "tim3_hw.h"
@@ -220,19 +221,9 @@ static uint8_t acq_wait_rearm(void)
                 fed_at = now;
                 board_iwdg_feed();
             }
-            if (s_trig_slope_hw == 1U) {
-                uint32_t hi = (uint32_t)s_trig_level + ACQ_TRIGGER_HYST;
-
-                if (hi > 4095U) {
-                    hi = 4095U;
-                }
-                ready = (s >= hi) ? 1U : 0U;   /* falling: wait until high */
-            } else {
-                uint32_t lo = ((uint32_t)s_trig_level > ACQ_TRIGGER_HYST)
-                            ? ((uint32_t)s_trig_level - ACQ_TRIGGER_HYST) : 0U;
-
-                ready = (s <= lo) ? 1U : 0U;   /* rising: wait until low    */
-            }
+            /* Falling waits until high (rearm side), rising until low. */
+            ready = acq_handoff_rearm_ready(s, s_trig_slope_hw,
+                                            s_trig_level, ACQ_TRIGGER_HYST);
             if (ready != 0U) {
                 return 1U;
             }
@@ -380,7 +371,8 @@ void acq_isr_adc(void)
     {
         uint32_t cnt  = TIM3->CNT;
         uint32_t ndtr = DMA1_Channel1->CNDTR & 0xFFFFU;
-        uint32_t idx  = (ndtr <= ACQ_SAMPLES) ? (ACQ_SAMPLES - ndtr) : 0U;
+        uint32_t idx  = (ndtr <= ACQ_SAMPLES)
+                      ? ((ACQ_SAMPLES - ndtr) % ACQ_SAMPLES) : 0U;
 
         s_hw_seq++;
         s_hw_capture.count         = cnt;
@@ -797,6 +789,8 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
     out->write_index   = s_snap_pos;
     out->duration_ms   = 0U;
     out->arm_generation = gen;
+    out->post_span     = 0U;
+    out->span_valid    = 0U;
 
     /* SINGLE already took its one window: stay parked without touching the
      * sample path, so the displayed capture cannot be overwritten. */
@@ -864,40 +858,62 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
     }
     board_iwdg_feed();
 
-    /* Arm only when the input is on the waiting side of the one-sided band.
-     * Arming while it is already past the threshold latches the watchdog on
-     * the first conversion, giving the random-phase window this engine used
-     * to show.
+    /* Arm only when the input is inside the one-sided watchdog window at a
+     * deterministic arming boundary.  Arming while the signal is outside the
+     * window latches AWD on the first out-of-window conversion (random/mid-
+     * plateau), which refinement cannot recover from if the true edge is
+     * outside its search window.
      *
-     * Even if the hysteresis rearm wait times out, we must not enable AWDIE
-     * while the current sample is outside the watchdog window: that would
-     * fire immediately at an arbitrary phase (mid-plateau latch), which the
-     * software refinement cannot recover from if the true edge is outside its
-     * search window.  In that case skip arming for this cycle and let the
-     * mode policy handle it as an untriggered/timeout attempt. */
+     * acq_wait_rearm() observes a rearm-side sample while conversions run, but
+     * the signal can cross before AWDIE is enabled.  To eliminate that
+     * residual rearm-to-enable TOCTOU, conversions are quiesced for the arm
+     * decision: TIM3 TRGO pacing is stopped and ADC DMA requests are gated so
+     * no new conversions/transfers occur, any in-flight conversion is allowed
+     * to settle (bounded), the boundary sample is read from a stable ring, AWD
+     * state is cleared, and AWDIE is enabled only if the boundary sample is
+     * inside the window.  Because no conversion can complete between the
+     * boundary check and AWDIE enable while quiesced, the enable cannot race
+     * with a changing sample.  Conversions are then resumed (TIM3 restarted,
+     * CR2_DMA restored), which introduces a timing discontinuity/gap but
+     * preserves ring contents/CNDTR state.
+     *
+     * If the boundary sample is outside the window (rearm crossed during
+     * handoff, or rearm timed out still outside), AWDIE stays disabled and the
+     * cycle times out under mode policy (bounded, no hang, no spurious latch).
+     */
     {
-        uint8_t rearm_ready = acq_wait_rearm();
-        uint8_t arm_safe = rearm_ready;
+        uint8_t  rearm_ready = acq_wait_rearm();
+        uint16_t s_now;
+        uint8_t  arm_safe;
+        struct tim3_config tcfg;
 
-        if (arm_safe == 0U) {
-            uint16_t s = acq_latest_sample();
+        /* Quiesce: stop pacing triggers and gate DMA requests, then wait
+         * bounded for any in-flight conversion/transfer to settle (CNDTR
+         * stable).  2 ms bound is far above max conversion time (<<1 ms). */
+        tim3_hw_stop();
+        ADC1->CR2 &= ~ADC_CR2_DMA;
+        {
+            uint32_t prev = DMA1_Channel1->CNDTR & 0xFFFFU;
+            uint32_t stable = 0U;
+            uint32_t q0 = HAL_GetTick();
 
-            if (s_trig_slope_hw == 1U) {
-                /* Falling band [level-hyst, 4095]: safe inside window. */
-                uint32_t lo = ((uint32_t)s_trig_level > ACQ_TRIGGER_HYST)
-                            ? ((uint32_t)s_trig_level - ACQ_TRIGGER_HYST) : 0U;
-                arm_safe = (s >= lo) ? 1U : 0U;
-            } else {
-                /* Rising band [0, level+hyst]: safe inside window. */
-                uint32_t hi = (uint32_t)s_trig_level + ACQ_TRIGGER_HYST;
-                if (hi > 4095U) { hi = 4095U; }
-                arm_safe = (s <= hi) ? 1U : 0U;
+            while (stable < 3U) {
+                uint32_t cur = DMA1_Channel1->CNDTR & 0xFFFFU;
+
+                if (cur == prev) {
+                    stable++;
+                } else {
+                    stable = 0U;
+                    prev = cur;
+                }
+                if ((int32_t)(HAL_GetTick() - (q0 + 2U)) >= 0) {
+                    break; /* bounded: settle timeout */
+                }
             }
         }
 
-        /* Rearm the one-shot watchdog: disarm, clear the stale flag, reset the
-         * event, arm again.  Order matters: the flag must be CLEAN before the
-         * interrupt is enabled, otherwise arming latches an old crossing. */
+        /* Deterministic boundary while quiesced: clean AWD/event state, take
+         * a stable boundary sample, and enable AWDIE only when safe. */
         arm_generation_bump();
         hw_capture_invalidate();
         gen = s_arm_generation;
@@ -906,13 +922,33 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
         ADC1->SR   = 0U;
         s_event        = 0U;
         s_trigger_index = 0U;
+
+        s_now = acq_latest_sample();
+        arm_safe = acq_handoff_should_arm(rearm_ready, s_now,
+                                          s_trig_slope_hw,
+                                          s_trig_level, ACQ_TRIGGER_HYST);
         if (arm_safe != 0U) {
             ADC1->CR1 |= ADC_CR1_AWDIE;
         }
-        /* If unsafe to arm (sample outside window), leave AWDIE disabled:
-         * the trigger-wait poll below will expire normally and the mode
-         * policy (AUTO fallback / NORM-SINGLE hold) applies without a
-         * spurious mid-plateau latch. */
+        (void)rearm_ready;
+
+        /* Resume conversions: restore DMA requests and restart TIM3 pacing.
+         * DMA channel/CNDTR/ring contents are preserved; restart introduces a
+         * sampling-time discontinuity but no new DMA writes occurred while
+         * quiesced. */
+        ADC1->CR2 |= ADC_CR2_DMA;
+        s_resume_pos = (uint16_t)((ACQ_SAMPLES
+                         - (DMA1_Channel1->CNDTR & 0xFFFFU)) % ACQ_SAMPLES);
+        if ((tim3_config_for(s_hw_timebase, &tcfg) != 0U)
+            || (tim3_hw_start(&tcfg) != 0U)) {
+            status_acq_hw_errors_inc();
+            out->triggered     = 0U;
+            out->fresh         = 0U;
+            out->trigger_index = 0U;
+            out->write_index   = s_snap_pos;
+            out->duration_ms   = 0U;
+            return ACQ_HW_ERROR;
+        }
     }
 
     t0 = HAL_GetTick();
@@ -971,39 +1007,50 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
              * 500 ms/div.  A fixed 1 s budget made every cycle at 200 ms/div
              * and slower give up and re-capture at a random phase. */
             uint32_t post_ms = ACQ_POST_FILL_MS;
+            uint64_t need_ns = (uint64_t)post_samples
+                             * (uint64_t)timebase_tick_ns(s_hw_timebase);
+            uint8_t  tight;
+            uint32_t spins_per_tick;
             {
-                uint32_t tick = timebase_tick_ns(s_hw_timebase);
-                uint64_t need = ((uint64_t)post_samples * (uint64_t)tick)
-                              / 1000000ULL + 50ULL;
+                uint64_t need_ms = need_ns / 1000000ULL + 50ULL;
 
-                if (need > 8000ULL) { need = 8000ULL; } /* stay under IWDG */
-                if (need > (uint64_t)post_ms) { post_ms = (uint32_t)need; }
+                if (need_ms > 8000ULL) { need_ms = 8000ULL; } /* stay under IWDG */
+                if (need_ms > (uint64_t)post_ms) { post_ms = (uint32_t)need_ms; }
             }
             uint32_t post_deadline = HAL_GetTick() + post_ms;
 
-            /* Wait for the post-trigger samples with a 1 ms tick per
-             * iteration.  The previous loop spun 1000 times with NO delay,
-             * which takes only microseconds: the DMA advances one sample per
-             * 3.1 us (fast) to 156 us (5 ms/div), so the counter could never
-             * reach `post_samples` before the guard ran out and every cycle
-             * was reported as a timeout - even though the watchdog fired.
-             * The iteration count is now the millisecond budget, so the
-             * bound is real wall-clock time and still finite for static
-             * checking. */
-            for (uint32_t waited = 0U; waited <= post_ms; waited++) {
-                uint32_t ndtr = DMA1_Channel1->CNDTR & 0xFFFFU;
-                uint32_t pos  = (ndtr <= ACQ_SAMPLES)
-                              ? ((ACQ_SAMPLES - ndtr) % ACQ_SAMPLES) : 0U;
+            /* B4.36: when the fill fits in a couple of milliseconds, poll
+             * CNDTR tightly instead of sleeping a whole tick.  At 50 us/div
+             * a 1 ms sleep used to overshoot the 224 requested samples by
+             * ~640, leaving almost no pre-trigger margin in the ring and
+             * making the snapshot span unpredictable.  The outer loop is
+             * still tick-bounded (finite wall-clock time) and the IWDG is
+             * fed every millisecond; the tight case just checks the counter
+             * more often inside one tick. */
+            tight = (need_ns <= (uint64_t)ACQ_POST_FILL_SPIN_NS) ? 1U : 0U;
+            spins_per_tick = (tight != 0U) ? ACQ_POST_FILL_SPIN_ITERS : 1U;
 
-                if (acq_ring_advance((uint16_t)base, (uint16_t)pos,
-                                     (uint16_t)ACQ_SAMPLES) >= post_samples) {
-                    triggered = 1U;
+            for (uint32_t waited = 0U; waited <= post_ms; waited++) {
+                for (uint32_t k = 0U; k < spins_per_tick; k++) {
+                    uint32_t ndtr = DMA1_Channel1->CNDTR & 0xFFFFU;
+                    uint32_t pos  = (ndtr <= ACQ_SAMPLES)
+                                  ? ((ACQ_SAMPLES - ndtr) % ACQ_SAMPLES) : 0U;
+
+                    if (acq_ring_advance((uint16_t)base, (uint16_t)pos,
+                                         (uint16_t)ACQ_SAMPLES) >= post_samples) {
+                        triggered = 1U;
+                        break;
+                    }
+                }
+                if (triggered != 0U) {
                     break;
                 }
                 if ((int32_t)(HAL_GetTick() - post_deadline) >= 0) {
                     break;                /* fall back to the tail window */
                 }
-                ms_delay(1U);
+                if (tight == 0U) {
+                    ms_delay(1U);
+                }
                 board_iwdg_feed();
             }
         }
@@ -1029,17 +1076,33 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
     tim3_hw_stop();
     ADC1->CR2 &= ~ADC_CR2_DMA;
     {
-        uint32_t prev = DMA1_Channel1->CNDTR & 0xFFFFU;
-
-        for (uint32_t i = 0U; i < 5U; i++) {
-            uint32_t cur;
-
-            ms_delay(1U);
-            cur = DMA1_Channel1->CNDTR & 0xFFFFU;
-            if (cur == prev) {
-                break;               /* the ring is no longer moving */
+        /* One conversion may already be in progress.  With the DMA request
+         * gated it completes into DR and raises EOC but cannot write the
+         * ring; drain it so every snapshot is taken at the same phase of the
+         * transfer.  Bounded, no millisecond sleep (TIM3 is already off). */
+        for (uint32_t i = 0U; i < ACQ_FREEZE_DRAIN_SPINS; i++) {
+            if ((ADC1->SR & ADC_SR_EOC) != 0U) {
+                break;
             }
-            prev = cur;
+        }
+        ADC1->SR = 0U;
+    }
+    {
+        uint32_t prev = DMA1_Channel1->CNDTR & 0xFFFFU;
+        uint32_t stable = 0U;
+
+        for (uint32_t i = 0U; i < ACQ_FREEZE_STABLE_SPINS; i++) {
+            uint32_t cur = DMA1_Channel1->CNDTR & 0xFFFFU;
+
+            if (cur == prev) {
+                stable++;
+                if (stable >= ACQ_FREEZE_STABLE_READS) {
+                    break;           /* the ring is no longer moving */
+                }
+            } else {
+                stable = 0U;
+                prev = cur;
+            }
         }
     }
 
@@ -1055,6 +1118,19 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
     out->fresh       = 1U;
     out->duration_ms = HAL_GetTick() - t0;
     out->write_index = s_snap_pos;
+
+    /* B4.36: measure how far the ring advanced between the trigger latch and
+     * the snapshot.  The caller refuses to publish a window whose post part
+     * is incomplete or whose pre part has already been overwritten; keeping
+     * the span here (rather than re-deriving it from CNDTR later) makes the
+     * check describe the capture that was actually copied. */
+    if (triggered != 0U) {
+        out->post_span = acq_ring_advance(
+            (uint16_t)(s_trigger_index % ACQ_SAMPLES),
+            (uint16_t)(s_snap_pos % ACQ_SAMPLES),
+            (uint16_t)ACQ_SAMPLES);
+        out->span_valid = 1U;
+    }
 
     /* Restart for the next cycle.  Each cycle is a fresh capture, so the
      * ring is re-based at index 0; the copy gap is not part of any window. */

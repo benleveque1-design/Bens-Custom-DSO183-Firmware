@@ -17,117 +17,49 @@ If it is not listed here as verified, assume it is unproven on hardware.
 
 ---
 
-## 1. Verified — bench-verified on the instrument
+## 1. Verified — bench-verified on the instrument (single tested unit)
 
-These were observed working on real hardware (the single tested unit, an
-STM32F103 medium-density rev A DSO183 with a 0x858552 display controller):
+- **Boot and watchdog:** the image boots, the IWDG watchdog is armed and fed; boot/heartbeat/main-loop state advances; acquisition reports healthy status in validated runs.
+- **Display:** ILI9341-compatible 320×240 panel works (controller readback 0x858552 on tested unit); graticule, trace, header/footer and SYSTEM DIAG operate as implemented.
+- **Acquisition path:** ADC1 (PA2) → DMA1 channel 1 → 1024-sample circular buffer, TIM3-paced; immutable snapshot frozen for frame building/measurement.
+- **Front-panel ladder:** gain/range/coupling slide switches decode from ADC ladder channels; sensitivity combinations and panel labels follow switch position. Coupling is analogue-only (not MCU-observable).
+- **PC link (UART 115200 8N1):** CRC-framed commands/replies, status/value queries, streaming, and coherent diagnostic reads (including GETV latch protocol) verified in use.
+- **Real-time trigger/alignment (B4.36, build 41320, 2026-11-15):** 12 configs × 50 captures (tb5/tb6/tb9, AUTO/NORM, rise/fall, 1 kHz 50% square, level 970) — **600/600 coherent, 0 no-frame, 0 diag errors, 0 rejected frames**. Requested edge within ±2 of index 96 in **all 600 captures**. **tb5 (50 µs/div) rising:** 50/50 AUTO and 50/50 NORM at 96 (previously 0/100 on 48462). Diagnostics showed `refined_found=1`, `fallback=0`, `anchor_kind=0` (local) throughout this run.
+- **Host test suite:** `make test` passes (36 suites, 1,318 checks on the B4.36 tree), including anchoring/window/trigger/ETS/diag/protocol coverage.
+- **Flash layout/safety:** reserved pages (settings, calibration, waveform slots, vendor device record) are separate from the application image; page-wise, read-back-verified flashing used (page 0 last). Recovery image for 14139 preserved.
 
-- **Boot and watchdog:** the image boots, the IWDG watchdog is armed (10 s)
-  and fed every superloop iteration; boot counter advances; heartbeat/main
-  loop advances; zero error flags (`ERR 00`).
-- **Display:** ILI9341-compatible panel works; text is upright and left-to-right
-  (MADCTL 0x68); grid + trace draw; read path works (`ID 858552`, `M 68`);
-  SYSTEM DIAG screen shows build identity, boot counter, loop counter, display
-  ID, MADCTL, ADC raw channels, error register.
-- **Acquisition path:** ADC1 → DMA1 → 1024-sample circular buffer runs, paced
-  by TIM3 TRGO; `DMA_CNDTR` moves; conversions start within the 20 ms
-  start-up bound; no hardware errors (`err 0`).
-- **Front-panel ladder:** the gain/range/coupling slide switches respond and
-  decode to live values (combo and coupling shown on UART and panel); all nine
-  sensitivity combinations appear; the panel's scale label follows switch
-  position (e.g. `3mV/d 1ms/d`).
-- **Trace:** a continuous waveform draws on the panel, centred on the frame
-  mean, with a dashed trigger-level marker and a bottom scale label.
-- **PC link:** protocol v1 verified end-to-end over `/dev/ttyUSB0` at
-  115200 8N1: GET_STATUS, SET_SPAN, STREAM, RUN/STOP all return correct
-  replies; STREAM produced 53 valid 520-byte CRC-checked frames in ~3 s
-  (~17.7 frames/s).
-- **RUN/STOP control:** verified over the link with replies echoing the
-  resulting run state.
-- **Host test suite:** all suites pass (`make test`), `make guard` reports
-  0 issues, `make check` passes and cross-checks `FLASH_HANDOVER.md` against
-  the built image.
-- **Flash layout:** reserved pages (settings, calibration, waveform slots,
-  vendor device record) are never touched by an image flash; the page-wise
-  writer freezes the IWDG during erase so a page erase cannot reset the target.
+## 2. Verified — host-tested only (logic proven, hardware path not fully exercised from this tree)
 
-## 2. Verified — host-tested only (logic proven, hardware path not yet exercised)
-
-These modules have full host unit-test coverage, but the complete hardware
-path has not been flashed/bench-verified from this tree:
-
-- **Trigger engine** (`app/trigger.c`): edge detection, hysteresis, re-arm,
-  AUTO/NORM/SINGLE policies — host-tested. Bench verification pending;
-  note the 50 µs/div rising-edge misalignment below.
-- **Timebase table** (`app/timebase.c`): 24-step 1-2-5 table, tick accuracy,
-  per-range sample-time policy — host-tested. TIM3 pacing bench-verified down
-  to 50 µs/div; faster single-shot rates not yet paced.
-- **Measurements** (`app/measure.c`): Vpp/mean/RMS/min/max integer maths —
-  host-tested against exact squares and a `double` reference; not yet
-  displayed beyond Vpp.
-- **Waveform decimation/mapping/rendering** (`app/waveform.c`, `app/render.c`,
-  `app/frame.c`): min/max-per-column decimation (spikes survive), y-mapping
-  with clamp guards — host-tested; not yet wired into the live draw path from
-  this tree.
-- **Calibration maths** (`app/cal.c`): `cal_fit()`, `cal_raw_to_uv()`
-  with saturation guards — host-tested; base offset/gain pair stored and
-  editable but not yet applied to the volts/div label or Vpp.
-- **PC-link codec & command policy** (`app/link.c`, `app/link_cmd.c`,
-  `app/link_host.c`): framing, CRC, argument validation — host-tested including
-  end-to-end round trips; the device side is also bench-verified (above).
-- **Settings & calibration storage** (`app/settings.c`, `app/cal_store.c`,
-  `app/cal_table.c`, `app/flash_store.c`): CRC/version/sequence/alternating
-  slots — host-tested including corruption and slot-order cases.
-- **Flash layout separation** (`app/flash_store.c`): settings and calibration
-  live in different 1 KiB pages — pinned by `tests/test_flash_layout.c`.
-- **Continuity detector** (`app/continuity.c`): hysteresis thresholds —
-  host-tested; reported visually (`CONT` suffix), no buzzer exists on the board.
+- **Trigger/anchoring policy:** span-bounded edge anchoring (`app/acq_anchor.c`), local pass parity, recovery pass for late latches, effective-span validation, and rejection/publish policy are host-tested (including the 129–131-sample late-latch geometries). Recovery was not exercised in the 41320 hardware campaign.
+- **ETS accumulation/phase/mapping logic:** epoch/source/phase/diagnostic modules and integration logic are host-tested. Hardware behaviour is range-, waveform-, and campaign-dependent (see below).
+- **Timebase table/maths:** 24-step table, tick/sampling relationships and policies host-tested.
+- **Measurements/mapping/calibration maths/link codec:** core pure-logic modules host-tested; not all user-facing measurement/product-parity features are complete.
+- **Settings/calibration/wave storage logic:** CRC/version/sequence/alternating-slot behaviour host-tested.
 
 ## 3. Experimental / partially verified
 
-- **Trigger stability:** AUTO/NORM/SINGLE work, but the **50 µs/div rising
-  edge is deterministically misaligned** (frames land ~191 samples off, with
-  no rising edge in the window). Falling edge at 50 µs/div is verified
-  aligned. Do not rely on 50 µs/div rising-edge triggering until root cause
-  is isolated (see `docs/trigger_timing_characterisation.md`).
-- **Trigger level:** adjustable 0–4095 and bidirectional (fixed in
-  remediation), but the default (2048) sits above the typical idle level
-  (~1195 counts), so NORM mode can appear dead until the level is lowered.
-- **Vpp readout:** now reports a pure count ratio (`stats.vpp × 80 / s_span`)
-  across the 8 divisions; matches the trace. Absolute volts/div scaling from
-  the base calibration pair is **not applied** (needs a measured reference).
-- **AC coupling:** the software AC branch (`wave_remove_mean()`) is wired to
-  the CPL switch, but on this board the coupling switch is analogue-only and
-  its position is not observable by the MCU — the AC branch is effectively
-  unreachable and GND coupling is not implemented.
-- **Timebase label:** now derived from `timebase_label()` (was hardcoded
-  `1 ms/d`); label correctness across all 24 steps is host-tested, bench
-  spot-checked only.
-- **Menu navigation:** 5 pages, tap/double-tap/long-hold queued via SysTick
-  at 1 kHz with debounce; auto-closes after 20 s idle. Short presses under
-  the old 500 ms loop were lost; now polled every pass (1 ms loop).
+- **ETS / TB0–TB4 (1–20 µs/div):** implemented as equivalent-time (REPT) ranges. **Not re-campaigned on 41320.** B4.32 hardware validation (build 12066, B2 Amendment A + B-REC) found: TB4 fast-undersampled square met coverage/ready in captured coherent evidence (fill 128, ready); TB2/TB3 did not reach the 80-bin gate in captured windows; TB0/TB1 fast aperture-unresolved square were coverage-limited (80-bin metric reported, no PASS/FAIL per B-REC); resolved sine/triangle (AC-2) not tested. Treat ETS as range/waveform dependent, not blanket-proven.
+- **Vpp/readout scaling:** Vpp is shown; absolute volts/div scaling from the base calibration pair is not yet applied to the trace/label (needs a measured reference). RMS/frequency/duty maths exist but not all are fully surfaced as product features.
+- **AC coupling:** CPL switch is analogue-only (not observable by the MCU); software cannot confirm or fully implement coupling selection in hardware terms.
+- **Trigger level UX:** adjustable 0–4095 and bidirectional; defaults/usability depend on signal level (AUTO recentring helps, but behaviour is signal-dependent).
+- **Single-instrument evidence:** all bench results are from one tested unit (STM32F103 rev A, display ID 0x858552). Other revisions/clones/panels are untested.
 
 ## 4. Known limitations (do not claim these)
 
 | Limitation | Detail |
 |------------|--------|
-| Product parity missing | RMS/frequency/duty readouts are computed but not all displayed; `AV+`/`AV−`/`Cycle`/`All Disp.` display modes absent; `Save WF`/`Load WF` absent; `Clr Offset`/`Default` menu actions present but per-sensitivity calibration not applied to the trace |
-| Five fastest timebases | 1–20 µs/div need equivalent-time sampling, not implemented; selecting them produces aliased data — rejected by `acq_set_timebase()` and clamped out of the UI/link |
+| Product parity incomplete | RMS/frequency/duty/AV+/AV-/Cycle/All Disp./Save WF/Load WF and some stock menu actions are only partially implemented or not fully surfaced |
+| TB0–TB4 are ETS-only | 1–20 µs/div require equivalent-time sampling; not real-time single-shot, and hardware-proven performance is range/waveform limited per prior evidence |
+| Calibration not fully applied | Per-sensitivity/base calibration stored but absolute volts/div scaling not fully applied to trace/readouts |
 | Coupling not observable | AC/DC/GND is analogue-only; firmware cannot read or confirm it |
-| Pushbutton pin unknown | PA8 is the leading candidate (vendor reads GPIOA bit 8 at boot); unproven on hardware |
-| Signal channel | ADC1 ch2 (PA2) confirmed in vendor binary and read live, but its landing point as the physical BNC input is an open bench item |
-| RAM heavily used | 81% of 20 KiB static; no framebuffer; further feature growth needs care |
-| Loop rate | ~1 ms non-streaming (was 500 ms); adequate but not high-frame-rate |
-| Single instrument tested | Compatibility with other DSO183 revisions/clones/display panels not tested, not claimed |
-| No host tests | `menu.c`, `acq.c` (engine/HAL), and HAL-level modules lack host tests |
-| USB | power-only on the DSO183; PC link is UART only |
-| Buzzer | none on the board; continuity is reported visually, not audibly |
+| RAM pressure | ~91% of 20 KiB used (41320); little headroom for large features without reclamation |
+| Host-test gaps | HAL-level modules and some hardware-integrated paths (`acq.c` engine/HAL, `menu.c`, display/UI integration) lack host tests |
+| No USB data | DSO183 USB is power-only; PC link is UART |
+| Single instrument tested | Compatibility with other DSO183 revisions/clones/display panels not tested or claimed |
 
 ## 5. Not in scope (deliberately out of this firmware)
 
-- Equivalent-time / repetitive sampling for 1–20 µs/div (planned as ETS/REPT
-  work — see `docs/ROADMAP.md`)
-- The vendor's TIM4_CCR1 trigger-position mechanism (this framework records
-  the buffer write position instead)
+- Vendor TIM4_CCR1 trigger-position mechanism (buffer write position/anchoring is used instead)
 - Any dependency on the ATSHA204A secure element (removed by design)
-- `st-flash write` / mass-erase flashing (prohibited — destroys calibration)
+- `st-flash write` / mass-erase flashing (prohibited — destroys reserved data)
+- Claims of universal hardware compatibility or blanket ETS correctness beyond evidenced cases

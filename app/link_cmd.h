@@ -83,9 +83,10 @@ enum link_getv {
     GETV_DIAG_SEQ           = 18U,  /* increments per recorded acquisition */
     GETV_DIAG_GATE_TRIGGERED= 19U,  /* 1 if HW AWD triggered this cycle */
     GETV_DIAG_HW_INDEX      = 20U,  /* raw gate.trigger_index (ring idx) */
-    GETV_DIAG_REFINED_INDEX = 21U,  /* final alignment index used */
-    GETV_DIAG_REFINED_FOUND = 22U,  /* 1 if SW refinement found crossing */
-    GETV_DIAG_FALLBACK      = 23U,  /* 0 refined, 1 used HW idx, 2 tail/untriggered */
+    GETV_DIAG_REFINED_INDEX = 21U,  /* final alignment index used (anchor) */
+    GETV_DIAG_REFINED_FOUND = 22U,  /* 1 if a requested-slope edge was verified */
+    GETV_DIAG_FALLBACK      = 23U,  /* 0 verified edge, 1 HW idx, 2 tail/untriggered,
+                                     * 3 span-invalid, 4 no-edge (3/4 rejected) */
     GETV_DIAG_TIMEBASE      = 24U,  /* timebase index */
     GETV_DIAG_TRIG_SLOPE    = 25U,  /* 0 rise, 1 fall, 2 auto */
     GETV_DIAG_TRIG_LEVEL    = 26U,  /* trigger level */
@@ -132,7 +133,15 @@ enum link_getv {
                                       * recorded acquisition, coherent with GETV 20/21. Latency
                                       * marker, not a sub-sample phase: used by the hardware
                                       * campaign to test the timing model (P1/P2) */
-    GETV_COUNT               = 46U
+    GETV_DIAG_LATCH          = 46U, /* copy the whole per-capture diagnostic struct into the
+                                      * stable latched copy; returns its seq.  Read 18..27, 45,
+                                      * 47..50 afterwards - they all come from that one copy. */
+    GETV_DIAG_POST_SPAN      = 47U, /* measured ring advance: hardware latch -> frozen write
+                                      * position (samples).  Independent of the anchor policy. */
+    GETV_DIAG_SPAN_VALID     = 48U, /* 1 if 47 is a measurement for a triggered capture */
+    GETV_DIAG_ANCHOR_KIND    = 49U, /* 0 local pass, 1 recovery pass, 2 HW index, 3 none */
+    GETV_DIAG_RECOVER_BACK   = 50U, /* recovery bound offered to the anchor policy (samples) */
+    GETV_COUNT               = 51U
 };
 
 /* ETS_RESET_REASON values/bitmask (GETV_ETS_RESET_REASON). */

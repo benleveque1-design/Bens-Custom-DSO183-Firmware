@@ -77,6 +77,19 @@ int32_t trig_scan(const uint16_t *samples, uint32_t n,
 int32_t trig_scan_nearest(const uint16_t *samples, uint32_t n,
                           uint32_t center, const struct trig_cfg *cfg);
 
+/* Same nearest-crossing scan, but over a circular buffer directly, so the
+ * caller does not have to copy a window (and the search length is not
+ * limited by a scratch-buffer size).
+ *
+ * `start` is the ring index of the first sample to examine, `n` is the
+ * number of samples (2..ring_size), and `center` is the LOCAL index (0..n-1)
+ * of the reference point (normally the hardware latch).  Returns the LOCAL
+ * index of the crossing nearest `center`, or -1.  Every access is reduced
+ * modulo `ring_size`, so a window may span the wrap point.  Pure logic. */
+int32_t trig_scan_ring_nearest(const uint16_t *ring, uint16_t ring_size,
+                               uint16_t start, uint32_t n, uint32_t center,
+                               const struct trig_cfg *cfg);
+
 /* Trigger mode FSM.  SINGLE needs an explicit re-arm; AUTO and NORM are
  * stateless except for the SINGLE armed flag. */
 struct trig_fsm {

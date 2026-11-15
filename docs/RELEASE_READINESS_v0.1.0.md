@@ -1,4 +1,11 @@
-# Release readiness — v0.1.0
+# Release readiness — v0.1.0 (historical / superseded)
+
+> **Superseded for current `main`:** this document describes the **v0.1.0** release
+> baseline. Current functionality and the latest validated state are tracked in
+> `README.md`, `agent.md`, `docs/FEATURES.md`, `FLASH_HANDOVER.md`, and
+> `B4_36_TRIGGER_FIX_AND_VALIDATION_REPORT.md` (B4.36, build 41320, 2026-11-15).
+> The build identities, hashes, and issue status below are specific to v0.1.0 and
+> may not reflect current `main`.
 
 **DSO183 custom firmware — repository description, topics, tagline, and reproduction instructions**
 

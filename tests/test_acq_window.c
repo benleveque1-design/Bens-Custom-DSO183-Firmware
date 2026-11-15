@@ -163,6 +163,28 @@ static void test_rejects_bad_input(void)
     CHECK(acq_win_copy(buf, BUF, &w, out, 4U) == 0U);       /* start >= size */
 }
 
+static void test_span_ok(void)
+{
+    /* 320-sample window, 96 pre / 224 post, 1024 ring. */
+    CHECK(acq_win_span_ok(224U, 1024U, 96U, 224U) == 1U); /* exactly enough */
+    CHECK(acq_win_span_ok(223U, 1024U, 96U, 224U) == 0U); /* post incomplete */
+    CHECK(acq_win_span_ok(927U, 1024U, 96U, 224U) == 1U); /* last legal span */
+    CHECK(acq_win_span_ok(928U, 1024U, 96U, 224U) == 0U); /* pre overwritten */
+    CHECK(acq_win_span_ok(640U, 1024U, 96U, 224U) == 1U); /* measured tb5 span */
+    CHECK(acq_win_span_ok(1023U, 1024U, 96U, 224U) == 0U);
+
+    /* A ring with no slack cannot host the window at all. */
+    CHECK(acq_win_span_ok(224U, 320U, 96U, 224U) == 0U);
+    CHECK(acq_win_span_ok(224U, 321U, 96U, 224U) == 1U);
+
+    /* Degenerate arguments. */
+    CHECK(acq_win_span_ok(0U, 1024U, 0U, 0U) == 0U);  /* zero window        */
+    CHECK(acq_win_span_ok(0U, 0U, 96U, 224U) == 0U);  /* no buffer          */
+    CHECK(acq_win_span_ok(1U, 4U, 1U, 1U) == 1U);
+    CHECK(acq_win_span_ok(2U, 4U, 1U, 1U) == 1U);     /* last legal (2+1<4) */
+    CHECK(acq_win_span_ok(3U, 4U, 1U, 1U) == 0U);     /* span+pre == size   */
+}
+
 int main(void)
 {
     init_buf();
@@ -175,6 +197,7 @@ int main(void)
     test_cap_truncation();
     test_tail_window();
     test_ring_advance();
+    test_span_ok();
     test_rejects_bad_input();
 
     if (failures == 0) {

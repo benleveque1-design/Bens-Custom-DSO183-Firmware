@@ -48,10 +48,14 @@ instrument for you. If you intend to flash, install pyocd:
 pip3 install pyocd
 ```
 
-The real write path is `tools/flash/write_page.py` (pyocd), and it
-**refuses to run without `AUTHORIZED=1`** in the environment. `st-flash write`
-is **not used** on the STM32F1 path: it mass-erases the chip and destroys the
-calibration/settings storage pages and the vendor device record.
+Use a **safe, page-wise, read-back-verified** flash path only (page 0 last).
+Do **not** use `st-flash write` on STM32F1: it can mass-erase and destroy
+calibration/settings and the vendor device record. For a controlled full-image
+flash when explicitly authorised, `tools/flash_cycle.py` is the recommended
+end-to-end tool (per-page/full verification and identity checks). Page-wise
+writers under `tools/flash/` (e.g. `write_image.py` / `write_page.py`) also
+require explicit authorisation (`AUTHORIZED=1`) and follow safeguards. See
+`FLASH_HANDOVER.md`.
 
 ---
 
@@ -101,29 +105,32 @@ the application sources, so every distinct source state gets its own identity.
 
 ---
 
-## 4. Flashing (dry run first — writes nothing)
+## 4. Flashing (user-controlled only, authorised)
 
-The flash path is entirely manual and user-authorized:
-
-```bash
-make flash-dry                                    # lists pages, writes nothing
-```
-
-For a real flash:
+The flash path is manual and user-authorised. Do not flash without explicit
+authorisation and a verified recovery/backup plan.
 
 ```bash
-AUTHORIZED=1 python3 tools/flash/write_image.py \
-    --image build/dso183.bin
+make flash-dry                                    # inspect/list as applicable, writes nothing
 ```
 
-The writer is page-wise with read-back verification and freezes the IWDG
-during erase so a page erase cannot reset the target. It preserves the
-reserved flash map (settings, calibration, waveform slots, vendor device
-record).
+For a controlled full-image flash (recommended when authorised):
 
-**Never** use `st-flash write` on the STM32F1: it mass-erases the chip and
-destroys calibration/settings. See `FLASH_HANDOVER.md` for the full flash
-procedure, reserved flash map, and recovery path.
+```bash
+python3 tools/flash_cycle.py --image build/dso183.bin --elf build/dso183.elf
+```
+
+Or use the page-wise writer under `tools/flash/` when appropriate:
+
+```bash
+AUTHORIZED=1 python3 tools/flash/write_image.py --image build/dso183.bin
+```
+
+Writes must be page-wise with read-back verification (page 0 last) and must
+preserve reserved regions (settings, calibration, waveform slots, vendor device
+record at `0x0800FC00` — never written). **Never** use `st-flash write` on
+STM32F1. See `FLASH_HANDOVER.md` for the full procedure, reserved map, and
+recovery.
 
 ---
 

@@ -1,4 +1,10 @@
-# Release notes — DSO183 custom firmware v0.1.0
+# Release notes — DSO183 custom firmware v0.1.0 (historical / superseded)
+
+> **Superseded for current `main`:** these notes describe the **v0.1.0** release.
+> For current functionality and the latest validated state, see `README.md`,
+> `docs/FEATURES.md`, `FLASH_HANDOVER.md`, and `B4_36_TRIGGER_FIX_AND_VALIDATION_REPORT.md`
+> (B4.36, build 41320, 2026-11-15). Statements below (including the 50 µs/div
+> rising-edge status and build identity) are specific to v0.1.0.
 
 **First public release. Pre-release baseline — not a product.**
 

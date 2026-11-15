@@ -1,3 +1,15 @@
+## Current status (B4.36, build 41320, 2026-11-15)
+
+- **Firmware:** build_seq **41320** deployed and verified on the tested instrument (SHA-256 `bfa6e7bf8bf681d202dba6267b5b8443d6ccd7fd2a2e234d9f1b0b7cc40e7efd`, 40,960 B; flash 66%, RAM 91%). UART `BUILD_SEQ 41320`, `STATUS 1`.
+- **50 µs/div trigger:** fixed by span-bounded edge anchoring with coherent diagnostics (B4.36). Hardware-validated 12×50 campaign: **600/600 coherent, 0 rejected**, tb5 rising 50/50 AUTO & 50/50 NORM within ±2 of index 96; regressions clean. See `B4_36_TRIGGER_FIX_AND_VALIDATION_REPORT.md`.
+- **ETS (TB0–TB4):** implemented (equivalent-time); range/waveform-dependent per B4.32 evidence, not re-campaigned on 41320.
+- **Docs/state:** `README.md`, `agent.md`, `docs/FEATURES.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `FLASH_HANDOVER.md`, and trigger docs reflect current functionality. `evidence/`, `build/`, `logs/` are gitignored.
+- **Safety:** safe page-wise, read-back-verified flashing only (page 0 last), never `st-flash write`, never touch `0x0800FC00`. 14139 recovery preserved.
+
+---
+
+## Historical notes (earlier working summary, not current state)
+
 ## Objective
 DSO183 custom firmware — 8-channel ADC switch mapping, display driver working with decoded range/gain, scaled Vpp measurements, and host-testable acquisition engine.
 

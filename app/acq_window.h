@@ -56,6 +56,28 @@ uint8_t acq_win_place_tail(uint16_t buf_size, uint32_t write_pos,
  * Returns 0 when either position is out of range or size is 0. */
 uint16_t acq_ring_advance(uint16_t prev, uint16_t pos, uint16_t size);
 
+/* Publishable-window guard (B4.36).
+ *
+ * `span` is the measured ring advance from the frame's anchor to the frozen
+ * write position, i.e. how much of the ring was written between the sample
+ * the frame is anchored on and the snapshot.  A window of `window` samples
+ * with `pre` samples before the anchor and `post = window - pre` after it is
+ * safe to publish only when every sample it needs is still present:
+ *
+ *   - the post-trigger part exists:            span >= post
+ *   - the pre-trigger part was not overwritten: span + pre < buf_size
+ *
+ * The second condition is the one a wrap-blind implementation misses: with
+ * span == buf_size - pre the oldest pre-trigger sample has already been
+ * replaced by the next lap, so the published frame would splice two
+ * different intervals together and show a phantom crossing.
+ *
+ * Returns 1 when the span is publishable, 0 otherwise (including
+ * buf_size <= pre + post, where no window can be safe).  Pure arithmetic:
+ * host tests exercise it without hardware. */
+uint8_t acq_win_span_ok(uint16_t span, uint16_t buf_size,
+                        uint16_t pre, uint16_t post);
+
 /* Copy the window out of the circular buffer into dst (cap entries).
  * Returns the number of samples copied: min(length, cap), 0 on bad args. */
 uint16_t acq_win_copy(const uint16_t *buf, uint16_t buf_size,

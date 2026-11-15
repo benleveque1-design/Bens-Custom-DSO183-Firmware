@@ -178,7 +178,32 @@ struct acq_gate {
                               * A hardware trigger-phase capture is only
                               * bindable to the window when its generation
                               * matches this value (B4.27). */
+    uint16_t post_span;      /* measured ring advance from the trigger latch
+                              * to the frozen write position, 0..ACQ_SAMPLES-1.
+                              * The display window is only publishable when
+                              * post_span >= post_samples and
+                              * post_span + pre < ACQ_SAMPLES (B4.36,
+                              * acq_win_span_ok). */
+    uint8_t  span_valid;     /* 1 = post_span is a measurement for a
+                              * triggered capture; 0 for timeout/tail or when
+                              * the span could not be established. */
 };
+
+/* Post-fill pacing.  The old loop always slept 1 ms between CNDTR polls,
+ * which at 50 us/div overshoots the requested 224 post-trigger samples by
+ * ~640 samples: the ring is nearly overwritten by the time the snapshot is
+ * taken and the pre-trigger region has very little margin.  When the whole
+ * fill fits in this budget the loop polls tightly instead (bounded by the
+ * same wall-clock deadline, IWDG fed per tick). */
+#define ACQ_POST_FILL_SPIN_NS  2000000U  /* <= 2 ms: tight poll, else sleep   */
+#define ACQ_POST_FILL_SPIN_ITERS   64U   /* CNDTR polls between tick checks   */
+
+/* Freeze: let one in-flight conversion land and prove CNDTR is stable.
+ * Both are short, bounded spins - no millisecond sleep, because TIM3 is
+ * already stopped and the DMA request is already gated. */
+#define ACQ_FREEZE_DRAIN_SPINS   64U
+#define ACQ_FREEZE_STABLE_SPINS  64U
+#define ACQ_FREEZE_STABLE_READS   3U
 
 /* Coherent copy of the ADC-watchdog trigger-phase capture (B4.27).
  *

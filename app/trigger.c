@@ -142,6 +142,77 @@ int32_t trig_scan_nearest(const uint16_t *samples, uint32_t n,
     return (found < 0) ? -1 : (int32_t)best;
 }
 
+int32_t trig_scan_ring_nearest(const uint16_t *ring, uint16_t ring_size,
+                               uint16_t start, uint32_t n, uint32_t center,
+                               const struct trig_cfg *cfg)
+{
+    uint16_t cross_lvl, rearm_lvl;
+    uint8_t armed = 0U;
+    uint32_t i;
+    uint32_t best = 0U;
+    uint32_t best_dist = 0xFFFFFFFFUL;
+    int32_t  found = -1;
+
+    if ((ring == NULL) || (cfg == NULL) || (ring_size < 2U) || (n < 2U)) {
+        return -1;
+    }
+    if (cfg->slope > TRIG_FALLING) {
+        return -1;
+    }
+    if (n > (uint32_t)ring_size) {
+        n = (uint32_t)ring_size;
+    }
+    if (start >= ring_size) {
+        start = (uint16_t)(start % ring_size);
+    }
+    /* centre is clamped to the examined segment: the caller passes the
+     * local index of the hardware latch, which is always inside it. */
+    if (center >= n) {
+        center = n - 1U;
+    }
+
+    if (cfg->slope == TRIG_RISING) {
+        cross_lvl = trig_cross(cfg->level, cfg->hyst_counts);
+        rearm_lvl = trig_rearm(cfg->level, cfg->hyst_counts);
+    } else {
+        cross_lvl = trig_rearm(cfg->level, cfg->hyst_counts);
+        rearm_lvl = trig_cross(cfg->level, cfg->hyst_counts);
+    }
+
+    for (i = 0U; i < n; i++) {
+        uint32_t idx = ((uint32_t)start + i) % (uint32_t)ring_size;
+        uint16_t cur = ring[idx];
+        uint8_t  fired;
+
+        if (armed != 0U) {
+            fired = (cfg->slope == TRIG_RISING) ? ((cur >= cross_lvl) ? 1U : 0U)
+                                                : ((cur <= cross_lvl) ? 1U : 0U);
+        } else {
+            fired = 0U;
+            if (cfg->slope == TRIG_RISING) {
+                if (cur <= rearm_lvl) {
+                    armed = 1U;
+                }
+            } else {
+                if (cur >= rearm_lvl) {
+                    armed = 1U;
+                }
+            }
+        }
+        if (fired != 0U) {
+            uint32_t dist = (i >= center) ? (i - center) : (center - i);
+
+            if (dist < best_dist) {
+                best_dist = dist;
+                best = i;
+                found = (int32_t)i;
+            }
+            armed = 0U;
+        }
+    }
+    return (found < 0) ? -1 : (int32_t)best;
+}
+
 void trig_fsm_init(struct trig_fsm *fsm, uint8_t mode)
 {
     if (fsm == NULL) {

@@ -23,6 +23,8 @@
 #include "runstate.h"
 #include "menu.h"
 #include "trigger.h"
+#include "acq_anchor.h"
+#include "acq_window.h"
 #include "timebase.h"
 #include "ets_phase.h"
 #include "ets_epoch.h"
@@ -185,19 +187,42 @@ static uint8_t  s_cpl = 0U;        /* 0 DC, 1 AC, 2 GND, 0xFF unknown (CPL SW1) 
 static uint8_t  s_trig_locked;     /* 1 = last displayed frame was edge-aligned */
 uint8_t s_trig_slope = 2U; /* 0 rising, 1 falling, 2 auto (shared with menu) */
 
-/* Trigger diagnostic telemetry snapshot (read-only, per recorded acquisition).
+/* Trigger diagnostic telemetry (read-only, one snapshot per recorded
+ * acquisition).
+ *
+ * Every field in one struct describes the SAME capture.  GETV_DIAG_LATCH
+ * copies the whole struct into s_diag_pub in one command; the per-field
+ * GETV_DIAG_* commands then read that latched copy.  The old layout exposed
+ * live globals one at a time, and each GETV costs ~110 ms while a capture
+ * completes in ~100 ms, so an 11-field bracket could never be coherent.
+ *
+ * Both structs are written and read from the main loop only (acq_bench_poll
+ * records, link_handle latches); no ISR touches them, so a plain struct copy
+ * is atomic with respect to every reader.
+ *
  * Instrumentation only; easy to remove/disable. */
-static volatile uint16_t s_diag_seq;
-static volatile uint8_t  s_diag_gate_triggered;
-static volatile uint16_t s_diag_hw_index;
-static volatile uint16_t s_diag_hw_count;   /* raw TIM3 count of that capture */
-static volatile uint16_t s_diag_refined_index;
-static volatile uint8_t  s_diag_refined_found;
-static volatile uint8_t  s_diag_fallback; /* 0 refined, 1 HW idx, 2 tail/untriggered */
-static volatile uint8_t  s_diag_timebase;
-static volatile uint8_t  s_diag_trig_slope_snap;
-static volatile uint16_t s_diag_trig_level_snap;
-static volatile uint8_t  s_diag_trig_mode_snap;
+struct acq_diag {
+    uint16_t seq;             /* increments per recorded acquisition          */
+    uint16_t hw_index;        /* raw gate.trigger_index (ring index)          */
+    uint16_t hw_count;        /* raw TIM3 count latched by the watchdog ISR   */
+    uint16_t anchor_index;    /* ring index finally used for the frame        */
+    uint16_t trig_level;      /* trigger level for this capture               */
+    uint16_t post_span;       /* measured ring advance latch -> snapshot      */
+    uint16_t anchor_span;     /* effective ring advance anchor -> snapshot    */
+    uint16_t recover_back;    /* recovery bound offered to acq_anchor_pick    */
+    uint8_t  gate_triggered;  /* 1 if the hardware watchdog fired             */
+    uint8_t  refined_found;   /* 1 if a requested-slope edge was verified     */
+    uint8_t  fallback;        /* 0 verified edge, 1 HW idx, 2 tail/no trigger,
+                               * 3 span-invalid, 4 no-edge (3/4 = rejected)    */
+    uint8_t  anchor_kind;     /* 0 local pass, 1 recovery pass, 2 HW, 3 none  */
+    uint8_t  span_valid;      /* 1 if post_span is a measured span            */
+    uint8_t  timebase;
+    uint8_t  trig_slope;
+    uint8_t  trig_mode;
+};
+
+static struct acq_diag s_diag;      /* live: written by acq_bench_poll          */
+static struct acq_diag s_diag_pub;  /* latched: written by GETV_DIAG_LATCH      */
 
 /* Display window = 10 divisions x 32 samples/div (timebase.h).  It was 256,
  * i.e. only 8 divisions: every timebase was then 25% fast and a slow
@@ -214,12 +239,12 @@ static uint16_t s_frame[BENCH_WINDOW];
 /* Shared transient scratch (M3 RAM optimisation).
  * Sequential lifetime contract in one acq_bench_poll iteration (main thread,
  * synchronous, not reentrant, not ISR/DMA accessible; no pointer escapes):
- *   R (refinement) — trig_search valid only inside trig_refine() (filled from
- *                    acq ring, consumed by refinement scan); dead on return.
- *   E (ETS sweep)  — same storage may be reused as a BENCH_WINDOW-uint16_t
- *                    transient build buffer only inside ets_accumulate(), after
- *                    trig_refine() has returned and before Phase T; dead on
- *                    ets_accumulate() return (contents consumed within call).
+ *   E (ETS sweep)  — trig_anchor() no longer fills trig_search (it scans the
+ *                    ring in place), so this storage is now purely the ETS
+ *                    transient buffer: valid only as a BENCH_WINDOW-uint16_t
+ *                    build buffer inside ets_accumulate(), before Phase T;
+ *                    dead on ets_accumulate() return (contents consumed
+ *                    within the call).
  *   T (stream TX)  — tx valid only in the streaming branch after final
  *                    frame/ETS/averaging work (link_encode_frame then blocking
  *                    HAL_UART_Transmit via console_write); dead after transmit.
@@ -495,16 +520,21 @@ static uint16_t op_get_value(uint8_t sub)
     case GETV_WAVE_SAVED_0: return wave_store_valid(0U) ? 1U : 0U;
     case GETV_WAVE_SAVED_1: return wave_store_valid(1U) ? 1U : 0U;
     case GETV_AVG_N:        return (uint16_t)s_avg_n;
-    case GETV_DIAG_SEQ:            return s_diag_seq;
-    case GETV_DIAG_GATE_TRIGGERED: return (uint16_t)s_diag_gate_triggered;
-    case GETV_DIAG_HW_INDEX:       return s_diag_hw_index;
-    case GETV_DIAG_REFINED_INDEX:  return s_diag_refined_index;
-    case GETV_DIAG_REFINED_FOUND:  return (uint16_t)s_diag_refined_found;
-    case GETV_DIAG_FALLBACK:       return (uint16_t)s_diag_fallback;
-    case GETV_DIAG_TIMEBASE:       return (uint16_t)s_diag_timebase;
-    case GETV_DIAG_TRIG_SLOPE:     return (uint16_t)s_diag_trig_slope_snap;
-    case GETV_DIAG_TRIG_LEVEL:     return s_diag_trig_level_snap;
-    case GETV_DIAG_TRIG_MODE:      return (uint16_t)s_diag_trig_mode_snap;
+    case GETV_DIAG_LATCH:
+        /* One command, one coherent capture.  Every field below reads the
+         * latched copy until the next latch command. */
+        s_diag_pub = s_diag;
+        return s_diag_pub.seq;
+    case GETV_DIAG_SEQ:            return s_diag_pub.seq;
+    case GETV_DIAG_GATE_TRIGGERED: return (uint16_t)s_diag_pub.gate_triggered;
+    case GETV_DIAG_HW_INDEX:       return s_diag_pub.hw_index;
+    case GETV_DIAG_REFINED_INDEX:  return s_diag_pub.anchor_index;
+    case GETV_DIAG_REFINED_FOUND:  return (uint16_t)s_diag_pub.refined_found;
+    case GETV_DIAG_FALLBACK:       return (uint16_t)s_diag_pub.fallback;
+    case GETV_DIAG_TIMEBASE:       return (uint16_t)s_diag_pub.timebase;
+    case GETV_DIAG_TRIG_SLOPE:     return (uint16_t)s_diag_pub.trig_slope;
+    case GETV_DIAG_TRIG_LEVEL:     return s_diag_pub.trig_level;
+    case GETV_DIAG_TRIG_MODE:      return (uint16_t)s_diag_pub.trig_mode;
     case GETV_MEM_STACK_FREE_NOW:  {
         uint32_t v = memdiag_stack_free_now();
         return (v > 65535U) ? 65535U : (uint16_t)v;
@@ -542,7 +572,11 @@ static uint16_t op_get_value(uint8_t sub)
     case GETV_ETS_SRC_QUANTISED:   return ets_epoch_src_quantised(&s_ets);
     case GETV_ETS_REJECT_UNBOUND:  return ets_epoch_reject_unbound(&s_ets);
     case GETV_ETS_HW_ROLLOVER:     return ets_epoch_hw_rollover(&s_ets);
-    case GETV_DIAG_HW_COUNT:       return s_diag_hw_count;
+    case GETV_DIAG_HW_COUNT:       return s_diag_pub.hw_count;
+    case GETV_DIAG_POST_SPAN:      return s_diag_pub.post_span;
+    case GETV_DIAG_SPAN_VALID:     return (uint16_t)s_diag_pub.span_valid;
+    case GETV_DIAG_ANCHOR_KIND:    return (uint16_t)s_diag_pub.anchor_kind;
+    case GETV_DIAG_RECOVER_BACK:   return s_diag_pub.recover_back;
     default:               return 0U;
     }
 }
@@ -1939,114 +1973,89 @@ static void ladder_refresh(void)
     }
 }
 
-/* Software edge refinement around the hardware trigger.
+/* Edge anchoring around the hardware latch (B4.36).
  *
- * The ADC analog watchdog is one-sided now (acq_set_trigger_slope), so its
- * latched index already marks the requested edge direction; the remaining
- * error is only the ADC-to-ISR latency.  Search a small window CENTRED on
- * gate->trigger_index instead of a blind 512-sample backward scan: the old
- * scan could pick an unrelated earlier edge whenever the hardware event was
- * close to the window boundary, and it could not find anything at all when
- * the trigger level sat outside the captured signal - the "wave keeps
- * rebuilding" symptom.  Within that window the crossing NEAREST to the
- * hardware event is chosen (trig_scan_nearest), because at a fast timebase
- * the window can hold several periods and the first crossing in it may be
- * far from the edge the watchdog actually latched.  When the local scan
- * finds no clean edge (very slow signal, or a spurious first-conversion
- * latch) the hardware index is the best available answer and the caller
- * keeps it. */
-#define TRIG_REFINE_BACK 128U
-#define TRIG_REFINE_FWD   48U
-
-static uint32_t trig_refine(const struct acq_gate *gate, uint8_t *found)
+ * The ADC analog watchdog is a LEVEL detector: the index it latches is only
+ * guaranteed to be a sample on the trigger side of the threshold, NOT the
+ * edge itself.  At 50 us/div the latch was observed 129 samples after the
+ * true rising edge; the old "refine within 128 samples back" pass could not
+ * reach the edge and published the mid-plateau index instead, placing the
+ * requested edge off-screen to the left and showing the *opposite*
+ * transition ~190 samples late.
+ *
+ * acq_anchor_pick() applies the replacement policy:
+ *   1. local pass - exactly the historic 128-back / 48-forward search (and
+ *      its simple-threshold fallback), so a healthy latch is anchored
+ *      bit-identically to before;
+ *   2. bounded recovery pass behind the latch - only when the local pass
+ *      finds nothing, which is what a late/mid-plateau latch needs;
+ *   3. the chosen edge is span-validated by the caller before publication.
+ *
+ * On ETS ranges the recovery pass is disabled: the equivalent-time path
+ * associates a sweep with the hardware event through the same bounded local
+ * window, and accepting a far-away edge there would place a sweep on a
+ * different period.
+ *
+ * Returns the chosen ring index (0 when there is nothing to anchor).  The
+ * outputs describe the decision for the diagnostic latch. */
+static uint32_t trig_anchor(const struct acq_gate *gate, uint8_t *found,
+                            uint8_t *recovered, int32_t *offset,
+                            uint16_t *recover_back)
 {
     memdiag_msp_sample();
     const uint16_t *ring = acq_samples();
     uint16_t ring_size = (uint16_t)acq_sample_count();
-    uint16_t n = (uint16_t)(TRIG_REFINE_BACK + TRIG_REFINE_FWD);
-    uint16_t start;
-    uint16_t i;
-    struct trig_cfg cfg;
-    int32_t edge;
+    struct acq_anchor_cfg cfg;
+    struct acq_anchor anchor;
 
     *found = 0U;
+    *recovered = 0U;
+    *offset = 0;
+    *recover_back = 0U;
     s_last_trig_valid = 0U;
-    if ((ring == NULL) || (ring_size == 0U) || (gate == NULL)
+
+    if ((ring == NULL) || (ring_size < 2U) || (gate == NULL)
         || (gate->triggered == 0U)) {
         return 0U;
     }
-    if (n > ring_size) {
-        n = ring_size;
+
+    /* Recovery is bounded by the measured span so the recovered edge stays
+     * publishable: an edge `d` samples before the latch raises the effective
+     * span to post_span + d, and acq_win_span_ok() requires
+     * effective_span + pre < ring_size. */
+    if ((acq_ets_active() == 0U) && (gate->span_valid != 0U)) {
+        int32_t room = (int32_t)ring_size - 1 - (int32_t)BENCH_PRE
+                     - (int32_t)gate->post_span;
+
+        if (room > 0) {
+            uint32_t cap = ((uint32_t)room > ACQ_ANCHOR_RECOVER_MAX)
+                         ? ACQ_ANCHOR_RECOVER_MAX : (uint32_t)room;
+
+            *recover_back = (uint16_t)cap;
+        }
     }
-    if (n > TRIG_SEARCH_LEN) {
-        n = TRIG_SEARCH_LEN;
-    }
-    start = (uint16_t)(((uint32_t)gate->trigger_index + (uint32_t)ring_size
-                        - (uint32_t)TRIG_REFINE_BACK) % (uint32_t)ring_size);
-    for (i = 0U; i < n; i++) {
-        s_acq_scratch.trig_search[i] =
-            ring[(uint16_t)(((uint32_t)start + (uint32_t)i)
-                             % (uint32_t)ring_size)];
-    }
-    cfg.level = acq_trigger_level_get();
-    cfg.hyst_counts = ACQ_TRIGGER_HYST;
+
+    cfg.scan.level = acq_trigger_level_get();
+    cfg.scan.hyst_counts = ACQ_TRIGGER_HYST;
     /* AUTO still aligns on one repeatable direction (rising), matching the
      * one-sided hardware band. */
-    cfg.slope = (s_trig_slope == TRIG_FALLING) ? TRIG_FALLING : TRIG_RISING;
+    cfg.scan.slope = (s_trig_slope == TRIG_FALLING) ? TRIG_FALLING : TRIG_RISING;
+    cfg.local_back = ACQ_ANCHOR_LOCAL_BACK;
+    cfg.local_fwd  = ACQ_ANCHOR_LOCAL_FWD;
+    cfg.recover_back = *recover_back;
 
-    {
-        uint32_t centre = (TRIG_REFINE_BACK < n) ? TRIG_REFINE_BACK
-                                                 : (uint32_t)(n - 1U);
+    if (acq_anchor_pick(ring, ring_size,
+                        (uint16_t)(gate->trigger_index % ring_size),
+                        &cfg, &anchor) == 0U) {
+        return 0U;
+    }
 
-        edge = trig_scan_nearest(s_acq_scratch.trig_search, (uint32_t)n,
-                                 centre, &cfg);
-    }
-    if (edge >= 0) {
-        *found = 1U;
-        s_last_trig_idx = ((uint32_t)start + (uint32_t)edge) % (uint32_t)ring_size;
-        s_last_trig_valid = 1U;
-        return s_last_trig_idx;
-    }
-    /* Fallback: strict Schmitt refinement can fail when the rearm condition
-     * is never satisfied inside the search window (e.g. trigger level near a
-     * signal extreme so level±hyst is outside the waveform).  The hardware
-     * watchdog already latched the intended edge direction; pick the nearest
-     * simple threshold crossing to the hardware event instead of discarding
-     * refinement entirely. */
-    {
-        uint32_t centre = (TRIG_REFINE_BACK < n) ? TRIG_REFINE_BACK
-                                                 : (uint32_t)(n - 1U);
-        uint16_t lvl = cfg.level;
-        uint32_t best = 0U;
-        uint32_t best_dist = 0xFFFFFFFFUL;
-        int32_t found_simple = -1;
-        uint32_t i;
-        for (i = 1U; i < (uint32_t)n; i++) {
-            uint16_t p = s_acq_scratch.trig_search[i - 1U];
-            uint16_t c = s_acq_scratch.trig_search[i];
-            uint8_t cross = 0U;
-            if (cfg.slope == TRIG_FALLING) {
-                cross = ((p > lvl) && (c <= lvl)) ? 1U : 0U;
-            } else {
-                cross = ((p < lvl) && (c >= lvl)) ? 1U : 0U;
-            }
-            if (cross != 0U) {
-                uint32_t dist = (i >= centre) ? (i - centre) : (centre - i);
-                if (dist < best_dist) {
-                    best_dist = dist;
-                    best = i;
-                    found_simple = (int32_t)i;
-                }
-            }
-        }
-        if (found_simple >= 0) {
-            *found = 1U;
-            s_last_trig_idx = ((uint32_t)start + (uint32_t)best) % (uint32_t)ring_size;
-            s_last_trig_valid = 1U;
-            return s_last_trig_idx;
-        }
-    }
-    return 0U;
+    *found = anchor.found;
+    *recovered = anchor.recovered;
+    *offset = anchor.offset;
+    s_last_trig_idx = anchor.index;
+    s_last_trig_valid = 1U;
+    return anchor.index;
 }
 
 
@@ -2123,10 +2132,11 @@ static uint8_t ets_accumulate(const struct acq_gate *gate, uint32_t trig_idx,
         return 0U;
     }
 
-    /* HW-edge <-> refined-edge association: trig_refine() searches a bounded
-     * window centred on the hardware latch, so a refined index outside that
-     * window cannot be the crossing the watchdog saw.  Reject rather than
-     * place the sweep on an unrelated edge. */
+    /* HW-edge <-> refined-edge association: the local anchoring pass searches
+     * a bounded window centred on the hardware latch (recovery is disabled on
+     * ETS ranges), so an index outside that window cannot be the crossing the
+     * watchdog saw.  Reject rather than place the sweep on an unrelated
+     * edge. */
     {
         uint32_t back = (uint32_t)(((uint32_t)gate->trigger_index
                                     + ACQ_SAMPLES - trig_idx) % ACQ_SAMPLES);
@@ -2134,7 +2144,7 @@ static uint8_t ets_accumulate(const struct acq_gate *gate, uint32_t trig_idx,
                                     - (uint32_t)gate->trigger_index)
                                    % ACQ_SAMPLES);
 
-        if ((back > TRIG_REFINE_BACK) && (fwd >= TRIG_REFINE_FWD)) {
+        if ((back > ACQ_ANCHOR_LOCAL_BACK) && (fwd >= ACQ_ANCHOR_LOCAL_FWD)) {
             ets_epoch_note_rejected(&s_ets);
             return 0U;
         }
@@ -2167,8 +2177,9 @@ static uint8_t ets_accumulate(const struct acq_gate *gate, uint32_t trig_idx,
     {
         struct frame tmpf;
         /* Phase E: reuse s_acq_scratch.trig_search as transient ETS sweep buffer.
-         * R (trig_refine) completed before ets_accumulate(); T (stream TX), if
-         * any, runs after ets_accumulate() returns. Synchronous use only. */
+         * trig_anchor() (ring-direct) completed before ets_accumulate();
+         * T (stream TX), if any, runs after ets_accumulate() returns.
+         * Synchronous use only. */
         uint8_t rc = frame_build(acq_samples(), (uint16_t)acq_sample_count(),
                                  trig_idx, BENCH_WINDOW, BENCH_PRE,
                                  scratch, BENCH_WINDOW, &tmpf);
@@ -2309,70 +2320,124 @@ static void acq_bench_poll(void)
         s_acq_timeouts++;
     }
 
-    /* AWD has no slope selectivity and fires on either band-exit direction,
-     * so its trigger_index gives phase-inconsistent alignment (trace scrolls).
-     * Refine with a software hysteresis edge scan for stable display. */
+    /* The analog watchdog is a level detector, so its latched index is not
+     * necessarily the requested edge.  Anchor on a verified edge (local pass,
+     * then a span-bounded recovery pass behind the latch) and publish only a
+     * window whose samples still exist in the ring - B4.36. */
     {
-        uint8_t refined = 0U;
-        uint8_t aligned = 0U;
-        uint8_t ets_active = acq_ets_active();
-        uint32_t trig_idx = trig_refine(&gate, &refined);
+        uint8_t  verified = 0U;
+        uint8_t  recovered = 0U;
+        uint8_t  aligned = 0U;
+        uint8_t  ets_active = acq_ets_active();
+        int32_t  offset = 0;
+        uint16_t recover_back = 0U;
+        uint32_t trig_idx = trig_anchor(&gate, &verified, &recovered, &offset,
+                                        &recover_back);
         uint32_t used_idx = 0U;
-        uint8_t  fallback = 2U; /* 0 refined, 1 hw index, 2 tail/untriggered */
+        uint16_t anchor_span = 0U;
+        uint8_t  fallback = 2U;    /* 0 verified edge, 1 HW idx, 2 tail,
+                                    * 3 span-invalid, 4 no-edge */
+        uint8_t  anchor_kind = 3U; /* 0 local, 1 recovery, 2 HW, 3 none */
+        uint8_t  publish = 1U;
 
-        /* On ETS ranges the equivalent-time path builds its own transient
-         * window and only publishes s_frame when a reconstruction completes.
-         * Building a raw single sweep into s_frame here first would clobber
-         * the last good reconstructed frame on every accumulating poll (and
-         * expose a raw sweep to wave-save/stream consumers). */
-        if (refined != 0U) {
+        if (verified != 0U) {
             used_idx = trig_idx;
             fallback = 0U;
-            if ((ets_active == 0U)
-                && (frame_build(acq_samples(), (uint16_t)acq_sample_count(),
-                                trig_idx, BENCH_WINDOW, BENCH_PRE,
-                                s_frame, BENCH_WINDOW, &f) != 0U)) {
-                return;
-            }
-            aligned = 1U;
+            anchor_kind = (recovered != 0U) ? 1U : 0U;
         } else if (gate.triggered != 0U) {
             used_idx = (uint32_t)gate.trigger_index;
             fallback = 1U;
-            if ((ets_active == 0U)
-                && (frame_build(acq_samples(), (uint16_t)acq_sample_count(),
-                                gate.trigger_index, BENCH_WINDOW, BENCH_PRE,
-                                s_frame, BENCH_WINDOW, &f) != 0U)) {
-                return;
-            }
-            aligned = 1U;
+            anchor_kind = 2U;
         } else {
             used_idx = (uint32_t)gate.write_index;
             fallback = 2U;
-            if ((ets_active == 0U)
-                && (frame_build_tail(acq_samples(), (uint16_t)acq_sample_count(),
-                                     gate.write_index, BENCH_WINDOW,
-                                     s_frame, BENCH_WINDOW, &f) != 0U)) {
-                return;
+            anchor_kind = 3U;
+        }
+
+        if ((gate.triggered == 0U) || (ets_active != 0U)) {
+            /* Tail window (no edge claim) and ETS (its own binding check
+             * decides acceptance) keep the pre-B4.36 publication path. */
+            publish = 1U;
+        } else if (verified == 0U) {
+            publish = 0U;
+            fallback = 4U;         /* no requested-slope edge in range       */
+        } else if (gate.span_valid == 0U) {
+            publish = 0U;
+            fallback = 3U;         /* no measured span for a triggered capture */
+        } else {
+            anchor_span = acq_anchor_effective_span(gate.post_span, offset);
+            if (acq_win_span_ok(anchor_span,
+                                (uint16_t)acq_sample_count(),
+                                (uint16_t)BENCH_PRE,
+                                (uint16_t)(BENCH_WINDOW - BENCH_PRE)) == 0U) {
+                publish = 0U;
+                fallback = 3U;     /* window no longer present in the ring    */
             }
         }
 
-        /* Diagnostic snapshot for last recorded acquisition (instrumentation). */
-        s_diag_seq++;
-        s_diag_gate_triggered = (gate.triggered != 0U) ? 1U : 0U;
-        s_diag_hw_index = (uint16_t)gate.trigger_index;
-        s_diag_hw_count = acq_trigger_hw_count();
-        s_diag_refined_index = (uint16_t)used_idx;
-        s_diag_refined_found = (refined != 0U) ? 1U : 0U;
-        s_diag_fallback = fallback;
-        s_diag_timebase = (uint8_t)acq_timebase_get();
-        s_diag_trig_slope_snap = s_trig_slope;
-        s_diag_trig_level_snap = acq_trigger_level_get();
-        s_diag_trig_mode_snap = (uint8_t)acq_trigger_mode_get();
+        /* One coherent diagnostic snapshot per recorded capture, including
+         * rejected ones: fallback 3/4 says why nothing was published. */
+        s_diag.seq++;
+        s_diag.gate_triggered = (gate.triggered != 0U) ? 1U : 0U;
+        s_diag.hw_index = (uint16_t)(gate.trigger_index % ACQ_SAMPLES);
+        s_diag.hw_count = acq_trigger_hw_count();
+        s_diag.anchor_index = (uint16_t)(used_idx % ACQ_SAMPLES);
+        s_diag.trig_level = acq_trigger_level_get();
+        s_diag.post_span = gate.post_span;
+        s_diag.anchor_span = anchor_span;
+        s_diag.recover_back = recover_back;
+        s_diag.refined_found = (verified != 0U) ? 1U : 0U;
+        s_diag.fallback = fallback;
+        s_diag.anchor_kind = anchor_kind;
+        s_diag.span_valid = gate.span_valid;
+        s_diag.timebase = (uint8_t)acq_timebase_get();
+        s_diag.trig_slope = s_trig_slope;
+        s_diag.trig_mode = (uint8_t)acq_trigger_mode_get();
+
+        if ((ets_active == 0U) && (publish == 0U)) {
+            /* Never publish a frame anchored on a mid-plateau index or on a
+             * window that no longer exists.  NORM keeps the last good frame;
+             * SINGLE re-arms for the next press; AUTO shows an unaligned tail
+             * window so it keeps refreshing and can re-centre a level that no
+             * longer intersects the signal. */
+            if (acq_trigger_mode_get() == (uint8_t)TRIG_MODE_SINGLE) {
+                (void)acq_trigger_arm();
+            }
+            if (acq_trigger_mode_get() != (uint8_t)TRIG_MODE_AUTO) {
+                return;
+            }
+            if (frame_build_tail(acq_samples(), (uint16_t)acq_sample_count(),
+                                 gate.write_index, BENCH_WINDOW,
+                                 s_frame, BENCH_WINDOW, &f) != 0U) {
+                return;
+            }
+        } else if (ets_active == 0U) {
+            /* On ETS ranges the equivalent-time path builds its own transient
+             * window and only publishes s_frame when a reconstruction
+             * completes.  Building a raw single sweep into s_frame here would
+             * clobber the last good reconstructed frame on every accumulating
+             * poll (and expose a raw sweep to wave-save/stream consumers). */
+            if (fallback == 2U) {
+                if (frame_build_tail(acq_samples(),
+                                     (uint16_t)acq_sample_count(),
+                                     gate.write_index, BENCH_WINDOW,
+                                     s_frame, BENCH_WINDOW, &f) != 0U) {
+                    return;
+                }
+            } else {
+                if (frame_build(acq_samples(), (uint16_t)acq_sample_count(),
+                                used_idx, BENCH_WINDOW, BENCH_PRE,
+                                s_frame, BENCH_WINDOW, &f) != 0U) {
+                    return;
+                }
+                aligned = 1U;
+            }
+        }
 
         /* ETS: accumulate triggered sweeps into equivalent-time frame. */
         if (ets_active != 0U) {
             if (gate.triggered != 0U) {
-                if (ets_accumulate(&gate, trig_idx, refined, &f) == 0U) {
+                if (ets_accumulate(&gate, trig_idx, verified, &f) == 0U) {
                     return; /* accumulate more sweeps */
                 }
                 aligned = 1U;

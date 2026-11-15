@@ -107,7 +107,13 @@ GETV_ETS_SRC_QUANTISED   = 42  # accepted sweeps placed at the trigger-quantised
 GETV_ETS_REJECT_UNBOUND  = 43  # subset of 35: capture invalid or from an earlier arming generation
 GETV_ETS_HW_ROLLOVER     = 44  # bound captures whose TIM3 count showed >= 1 wrap (diagnostic)
 GETV_DIAG_HW_COUNT       = 45  # raw TIM3 count of last watchdog capture (latency marker, not a phase)
-GETV_COUNT               = 46
+# B4.36 coherent trigger diagnostics (one latch, then read fields)
+GETV_DIAG_LATCH          = 46  # copy per-capture diag struct into the latched copy; returns its seq
+GETV_DIAG_POST_SPAN      = 47  # measured ring advance: HW latch -> frozen write position (samples)
+GETV_DIAG_SPAN_VALID     = 48  # 1 if 47 is a measurement for a triggered capture
+GETV_DIAG_ANCHOR_KIND    = 49  # 0 local pass, 1 recovery pass, 2 HW index, 3 none
+GETV_DIAG_RECOVER_BACK   = 50  # recovery bound offered to the anchor policy (samples)
+GETV_COUNT               = 51
 
 # Observable ETS readiness states (diagnostic interpretation):
 # - accumulating: accepted < target, ready == 0
@@ -496,16 +502,23 @@ def offline_failures() -> list:
     check("getv ets reject unbound idx", GETV_ETS_REJECT_UNBOUND == 43)
     check("getv ets hw rollover idx", GETV_ETS_HW_ROLLOVER == 44)
     check("getv diag hw count idx", GETV_DIAG_HW_COUNT == 45)
-    check("getv count 46", GETV_COUNT == 46)
+    check("getv diag latch idx", GETV_DIAG_LATCH == 46)
+    check("getv diag post span idx", GETV_DIAG_POST_SPAN == 47)
+    check("getv diag span valid idx", GETV_DIAG_SPAN_VALID == 48)
+    check("getv diag anchor kind idx", GETV_DIAG_ANCHOR_KIND == 49)
+    check("getv diag recover back idx", GETV_DIAG_RECOVER_BACK == 50)
+    check("getv count 51", GETV_COUNT == 51)
     for idx in (GETV_ETS_ACCEPTED_SWEEPS, GETV_ETS_REJECTED_SWEEPS,
                 GETV_ETS_ACCUM_PROGRESS, GETV_ETS_FILLED_BINS,
                 GETV_ETS_READY, GETV_ETS_RESET_REASON, GETV_ETS_DIAG_SEQ,
                 GETV_ETS_SRC_B1, GETV_ETS_SRC_QUANTISED,
                 GETV_ETS_REJECT_UNBOUND, GETV_ETS_HW_ROLLOVER,
-                GETV_DIAG_HW_COUNT):
+                GETV_DIAG_HW_COUNT, GETV_DIAG_LATCH, GETV_DIAG_POST_SPAN,
+                GETV_DIAG_SPAN_VALID, GETV_DIAG_ANCHOR_KIND,
+                GETV_DIAG_RECOVER_BACK):
         check("getv ets valid %d" % idx, arg_valid(OP_GET_VALUE, idx))
     check("getv 33 still valid", arg_valid(OP_GET_VALUE, 33))
-    check("getv 46 invalid", not arg_valid(OP_GET_VALUE, 46))
+    check("getv 51 invalid", not arg_valid(OP_GET_VALUE, 51))
     c_ets = cmd_bytes(12, OP_GET_VALUE, GETV_ETS_DIAG_SEQ)
     d_ets = cmd_parse(c_ets)
     check("getv ets diag seq roundtrip", d_ets == {"seq": 12, "op": OP_GET_VALUE, "arg": GETV_ETS_DIAG_SEQ})

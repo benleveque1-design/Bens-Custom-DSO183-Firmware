@@ -335,6 +335,29 @@ static int test_rising_50us_rearm_sensitive_scenario(void)
         CHECK(dst[287] == 881U);
     }
 
+    /* The campaign frame shows the same mechanism one sample later in phase
+     * (fall at 286, implying a +130 latch): the local window still starts
+     * after the true edge. */
+    {
+        static uint16_t dst2[WIN];
+        struct frame f2;
+        uint8_t nr2 = 0U, nf2 = 0U;
+        uint16_t nf2_idx = 0U;
+
+        rc = frame_build(ring, RING, rise_idx + 130U, WIN, PRE, dst2, WIN, &f2);
+        CHECK(rc == 0U);
+        for (i = 1U; i < WIN; i++) {
+            if ((dst2[i - 1U] < cfg.level) && (dst2[i] >= cfg.level)) { nr2++; }
+            if ((dst2[i - 1U] > cfg.level) && (dst2[i] <= cfg.level)) {
+                nf2++;
+                nf2_idx = (uint16_t)i;
+            }
+        }
+        CHECK(nr2 == 0U);
+        CHECK(nf2 == 1U);
+        CHECK(nf2_idx == 286U);
+    }
+
     /* A correctly rearmed rising edge remains detectable in a valid window. */
     start = (hw_correct + RING - BACK) % RING;
     for (i = 0U; i < (uint32_t)(BACK + FWD); i++) {
@@ -342,6 +365,59 @@ static int test_rising_50us_rearm_sensitive_scenario(void)
     }
     edge = trig_scan_nearest(search, (uint32_t)(BACK + FWD), centre, &cfg);
     CHECK(edge == 127);
+    return 0;
+}
+
+/* Ring-direct nearest scan: the anchoring module uses it so a search longer
+ * than the old 512-entry scratch buffer (and one that crosses the ring wrap)
+ * stays possible without extra RAM. */
+static int test_ring_scan_nearest(void)
+{
+    enum { RING = 32 };
+    static uint16_t ring[RING];
+    struct trig_cfg rise = { .level = 500U, .hyst_counts = 20U,
+                             .slope = TRIG_RISING };
+    struct trig_cfg fall = { .level = 500U, .hyst_counts = 20U,
+                             .slope = TRIG_FALLING };
+    uint32_t i;
+    int32_t e;
+
+    /* Low for i%8 < 4, high otherwise: rising crossings at 4,12,20,28 and
+     * falling crossings at 0,8,16,24. */
+    for (i = 0U; i < RING; i++) {
+        ring[i] = ((i % 8U) < 4U) ? 400U : 600U;
+    }
+
+    /* start=22, n=16 wraps: rising crossings at local 6 (ring 28) and
+     * local 14 (ring 4); the centre decides which one wins. */
+    e = trig_scan_ring_nearest(ring, RING, 22U, 16U, 8U, &rise);
+    CHECK(e == 6);
+    e = trig_scan_ring_nearest(ring, RING, 22U, 16U, 13U, &rise);
+    CHECK(e == 14);
+
+    /* Falling crossings in the same wrapped segment: ring 0 at local 10. */
+    e = trig_scan_ring_nearest(ring, RING, 22U, 16U, 8U, &fall);
+    CHECK(e == 10);
+
+    /* start >= ring_size is reduced, not rejected. */
+    e = trig_scan_ring_nearest(ring, RING, (uint16_t)(22U + RING), 16U, 8U,
+                               &rise);
+    CHECK(e == 6);
+
+    /* No crossing at all. */
+    for (i = 0U; i < RING; i++) {
+        ring[i] = 600U;
+    }
+    CHECK(trig_scan_ring_nearest(ring, RING, 0U, RING, 10U, &rise) == -1);
+    CHECK(trig_scan_ring_nearest(ring, RING, 0U, RING, 10U, &fall) == -1);
+
+    /* Fail fast on bad arguments. */
+    CHECK(trig_scan_ring_nearest(NULL, RING, 0U, 8U, 0U, &rise) == -1);
+    CHECK(trig_scan_ring_nearest(ring, RING, 0U, 8U, 0U, NULL) == -1);
+    CHECK(trig_scan_ring_nearest(ring, 0U, 0U, 8U, 0U, &rise) == -1);
+    CHECK(trig_scan_ring_nearest(ring, RING, 0U, 1U, 0U, &rise) == -1);
+    CHECK(trig_scan_ring_nearest(ring, RING, 0U, 8U, 0U,
+                                 &(struct trig_cfg){500U, 20U, 3U}) == -1);
     return 0;
 }
 
@@ -361,6 +437,7 @@ int main(void)
     failures += test_fsm_action();
     failures += test_window_start();
     failures += test_rising_50us_rearm_sensitive_scenario();
+    failures += test_ring_scan_nearest();
 
     if (failures == 0) {
         printf("trigger: all tests passed\n");

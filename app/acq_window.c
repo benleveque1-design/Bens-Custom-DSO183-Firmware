@@ -55,6 +55,25 @@ uint16_t acq_ring_advance(uint16_t prev, uint16_t pos, uint16_t size)
                       % (uint32_t)size);
 }
 
+uint8_t acq_win_span_ok(uint16_t span, uint16_t buf_size,
+                        uint16_t pre, uint16_t post)
+{
+    uint32_t window = (uint32_t)pre + (uint32_t)post;
+
+    /* A window must fit inside the ring with at least one sample of slack:
+     * otherwise the pre-trigger edge coincides with the next lap's write. */
+    if ((buf_size == 0U) || (window == 0U) || (window >= (uint32_t)buf_size)) {
+        return 0U;
+    }
+    if ((uint32_t)span < (uint32_t)post) {
+        return 0U;                    /* post-fill incomplete               */
+    }
+    if (((uint32_t)span + (uint32_t)pre) >= (uint32_t)buf_size) {
+        return 0U;                    /* pre-trigger sample overwritten      */
+    }
+    return 1U;
+}
+
 uint16_t acq_win_copy(const uint16_t *buf, uint16_t buf_size,
                       const struct acq_win *w, uint16_t *dst, uint16_t cap)
 {

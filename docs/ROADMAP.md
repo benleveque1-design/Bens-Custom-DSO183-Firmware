@@ -7,65 +7,36 @@ ordered, but priorities will shift with community contributions and bench
 findings. Nothing here has been implemented unless it is also listed in
 `docs/FEATURES.md` as verified.
 
-## Near term (the v0.1.x line)
+## Near term
 
-1. **Close the three audit P0s** (remediated in source; bench confirmation
-   still needed):
-   - settings and calibration in separate flash pages with CRC/version/sequence
-   - Vpp readout dimensionally correct (pure count ratio)
-   - bidirectional trigger level with a sane default
-2. **Persistence integrity** — CRC + version + sequence + alternating slots
-   (done in storage layer); save-on-release rather than per-menu-step; check
-   flash write return values.
-3. **Product parity with the stock UI:**
+1. **Product parity / UX completeness:**
    - Vrms, frequency, duty readouts on the panel (maths exist in `measure.c`)
    - `AV+`/`AV−`/`Cycle`/`All Disp.` display modes
-   - `Save WF` / `Load WF` to the two waveform slots
-   - `Clr Offset` / `Default` / `Default restored` menu actions
-   - per-sensitivity offset table applied to the trace (CAL-03/CAL-04)
-4. **Trigger:** bench-validate and fix the 50 µs/div rising-edge misalignment;
-   expose trigger telemetry (HW index, refined index, fallback flag) over the
-   link or SWD so the root cause can be isolated non-invasively.
+   - `Save WF` / `Load WF` parity and menu actions
+   - `Clr Offset` / `Default` behaviours fully aligned with intent
+   - per-sensitivity/base calibration applied to volts/div and trace/readouts
+2. **Persistence integrity hardening:** save-on-release where appropriate, robust error handling/feedback for flash writes, continued separation of reserved regions.
+3. **Trigger/diagnostics polish:** keep coherent diagnostics useful; extend validation to other signal shapes/levels/duty cycles and confirm behaviour across more conditions (recovery-path exercise on hardware if a late-latch case is observed).
+4. **Documentation and reproducibility:** keep reports/docs aligned with evidenced behaviour; maintain safe flashing/recovery guidance.
 
 ## Mid term
 
-5. **Display quality:** dirty-rectangle or previous-trace erase to remove the
-   full-frame clear/redraw flicker; optional rectangle-only repaint.
-6. **PC link:** query commands for measurements, trigger level, calibration
-   and settings; error replies beyond the status word; `STREAM` replies echoing
-   the stream state.
-7. **Link/UX polish:** the five equivalent-time-only timebases hidden in the
-   UI/link; `SET_SPAN` surviving ladder moves; text statistics throttled.
+5. **ETS validation and improvement:** broader hardware campaigns on TB0–TB4 (and on current builds) across waveforms/conditions; address coverage/acceptance limitations evidenced in B4.32 where feasible without violating B2/B-REC constraints.
+6. **Display quality:** reduce redraw/flicker (dirty regions/trace erase strategies) where practical within RAM/bandwidth limits.
+7. **PC link evolution:** richer query/status semantics and tooling; maintain protocol compatibility/versioning as features grow.
+8. **Measurement/display completeness:** surface computed measurements consistently with bench validation.
 
-## Long term (foundation work)
+## Long term
 
-8. **Equivalent-time / repetitive (ETS/REPT) sampling** for the five fastest
-   timebases (1–20 µs/div, indices 0–4). These need a sample interval shorter
-   than one ADC conversion (1.3125 µs), which real-time single-shot acquisition
-   cannot provide. ETS/REPT would re-acquire the same repetitive waveform over
-   multiple triggers, shifting the sampling phase slightly each time, and
-   reconstruct a fine-grained waveform — the classic approach for fast
-   repetitive signals on a slow ADC. This is **not implemented** and is the
-   largest remaining hardware-visible gap before the full 1 µs/div … 50 s/div
-   published range is trustworthy.
-9. **Per-range ADC sample-time programming** (`timebase_smp_code()` exists;
-   `acq.c` still uses a fixed aperture) so the fastest single-shot ranges can
-   use the 1.5-cycle minimum aperture.
-10. **Encoder / pushbutton confirmation** — if PA8 (or another pin) is
-    confirmed as the menu button on real hardware, wire it up.
-11. **More measurements** displayed (RMS, frequency, duty) with bench
-    validation on real signals.
+9. **ETS robustness/performance:** improve equivalent-time reconstruction quality and usability on the fastest ranges, within hardware limits (ADC conversion time, timing/phase constraints), and with honest range-specific validation.
+10. **Calibration workflow:** reference-based calibration applied end-to-end (trace and readouts), with clear UI/feedback.
+11. **Hardware confirmation/portability:** re-verify pin mappings, signal path, and display/controller behaviour on other units (without claiming compatibility prematurely).
 
 ## Explicitly not planned (staying small)
 
-This is a community project, not a race to the most sophisticated firmware.
-The following are deliberately out of scope unless a contributor champions
-them:
-
-- color themes / modern smartphone-style UI (the design brief is a retro
-  laboratory-instrument aesthetic, see `ui_design/UI_SPECIFICATION.md`)
-- a second channel (the DSO183 front end is single-channel)
-- USB host/device (the DSO183 USB socket is power-only)
-- real-time operating system (the superloop is intentional and simple)
+- color themes / modern smartphone-style UI (retro laboratory-instrument aesthetic)
+- a second channel (single-channel front end)
+- USB host/device data path (USB socket is power-only)
+- real-time operating system (superloop is intentional)
 
 Contributions are welcome at every experience level — see `CONTRIBUTING.md`.

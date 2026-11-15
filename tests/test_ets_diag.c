@@ -30,7 +30,12 @@ static int test_getv_append_only(void)
     CHECK(GETV_ETS_REJECT_UNBOUND == 43U);
     CHECK(GETV_ETS_HW_ROLLOVER == 44U);
     CHECK(GETV_DIAG_HW_COUNT == 45U);
-    CHECK(GETV_COUNT == 46U);
+    CHECK(GETV_DIAG_LATCH == 46U);
+    CHECK(GETV_DIAG_POST_SPAN == 47U);
+    CHECK(GETV_DIAG_SPAN_VALID == 48U);
+    CHECK(GETV_DIAG_ANCHOR_KIND == 49U);
+    CHECK(GETV_DIAG_RECOVER_BACK == 50U);
+    CHECK(GETV_COUNT == 51U);
     return 0;
 }
 
@@ -173,7 +178,7 @@ static int test_snapshot_retry_contract(void)
 
 static int test_link_cmd_arg_valid_getv(void)
 {
-    /* GETV subindices 0..45 valid, 46 invalid (append-only extension). */
+    /* GETV subindices 0..50 valid, 51 invalid (append-only extension). */
     CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 0U) == 1U);
     CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 33U) == 1U);
     CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 34U) == 1U);
@@ -181,7 +186,12 @@ static int test_link_cmd_arg_valid_getv(void)
     CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 41U) == 1U);
     CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 44U) == 1U);
     CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 45U) == 1U);
-    CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 46U) == 0U);
+    CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 46U) == 1U);
+    CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 47U) == 1U);
+    CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 48U) == 1U);
+    CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 49U) == 1U);
+    CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 50U) == 1U);
+    CHECK(link_cmd_arg_valid(LINK_OP_GET_VALUE, 51U) == 0U);
     return 0;
 }
 

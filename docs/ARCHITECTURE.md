@@ -5,230 +5,107 @@
 ## Overview
 
 The firmware is a **modular, host-testable** design. Pure-logic modules
-(acquisition, trigger, timebase, measurements, waveform decimation/mapping,
-rendering, calibration, PC-link framing, settings, run state) contain no HAL
-dependency and compile and run on a host computer for unit testing. Hardware
-glue lives only in `main()` and the board support files (`board_*.c`, `stm32f1xx_it.c`,
-the display driver). `--gc-sections` drops any module `main()` does not wire in,
-so unused code never costs flash.
+(acquisition helpers, trigger/anchoring, ETS logic, timebase, measurements,
+waveform/mapping, calibration, PC-link framing, storage helpers, run state)
+contain no HAL dependency where possible and are exercised by host tests.
+Hardware glue lives in `main()` and board/support files (`app/acq.c` engine/HAL
+integration, `board_*.c`, `stm32f1xx_it.c`, display driver).
 
-The design follows rules written down during the audit remediation:
+Design rules:
 
-- **No unbounded waits.** Every busy wait has an explicit `HAL_GetTick()`
-  deadline. A wait that exceeds its deadline returns an error rather than
-  spinning forever (the vendor's unbounded auto-zero wait is one of the defects
-  this replaces).
-- **No status-byte gates, no ATSHA204A dependency.** Calibration and settings
-  live in local flash pages; the firmware starts in a safe default state even
-  if the secure element is absent.
-- **Watchdog always armed, fed once per main-loop iteration.** A hung loop
-  resets; feeding from SysTick (which would keep a hung loop alive) is not
-  done.
-- **No shared "scratch slot" aliasing.** Each flash record has its own page,
-  version, sequence number and CRC.
+- **No unbounded waits.** Busy waits are bounded/deadline-based (IWDG recovers hangs).
+- **No status-byte gates, no ATSHA204A dependency.** Calibration/settings live in local flash; safe defaults on missing/invalid data.
+- **Watchdog always armed and fed** in bounded loops/iterations as designed.
+- **No shared "scratch slot" aliasing.** Flash records use separate pages/slots with CRC/version/sequence.
 
 ## MCU and clocking
 
-**STM32F103C8T6**, HSI-based clock tree (a deliberate, independent choice from
-the vendor's HSE/PLL):
+**STM32F103C8T6** (Cortex-M3, 64 KiB flash, 20 KiB SRAM, no FPU), HSI-based clocking:
 
-- `SYSCLK = 64 MHz` (HSI/2 × 16)
-- `APB1 = 32 MHz`, `APB2 = 64 MHz` (PCLK2)
-- Timer clock: on the F1, timers on APB1 run at **2 × PCLK1 when the prescaler
-  is not 1**, so **TIM3 = 64 MHz**, tick = 15.625 ns/count. (An earlier
-  revision assumed 32 MHz and was 2× fast — fixed.)
-- ADC clock = PCLK2 / 6 = 10.67 MHz, inside the 14 MHz limit. Shortest
-  conversion = 14 cycles (SMP 1.5 + 12.5) = 1.3125 µs.
+- `SYSCLK = 64 MHz`, `APB1 = 32 MHz`, `APB2 = 64 MHz`
+- TIM3 timer clock 64 MHz (15.625 ns/count) on APB1 prescaled config
+- ADC clock = PCLK2 / 6 = 10.666 MHz (14-cycle conversion at fastest sample time)
 
 ## Acquisition pipeline
 
 ```
-TIM3 (TRGO on update)  →  ADC1 regular conversion (channel 2, PA2)
+TIM3 (TRGO on update)  →  ADC1 regular conversion (ch2 / PA2)
                            →  DMA1 channel 1  →  1024-sample circular buffer (RAM)
-                                           →  acq_cycle() freezes DMA on trigger
-                                           →  frame_build() → linear window
-                                           →  measure()/cal()/waveform()/render()
-                                           →  display
+                                           →  acq_cycle() freeze/snapshot on event
+                                           →  frame placement / ETS accumulation
+                                           →  measure()/display/stream/store
 ```
 
-- **ADC1 channel 2 (PA2)** is the signal input and the analog-watchdog
-  (trigger) channel. The vendor configures the same channel for both.
-- **DMA1 channel 1** runs circular into a 1024-sample `uint16` buffer
-  (2 KiB of the 20 KiB RAM).
-- **TIM3 TRGO** paces exactly one conversion per update event
-  (`EXTTRIG = 1`, `EXTSEL = 100` = TIM3_TRGO — the same external-trigger
-  source the vendor uses, measured live on the bench; the vendor paces from
-  TIM2_CC2, so the two cores never share a timer).
-- `acq_cycle()` re-arms the watchdog, waits for a trigger (bounded timeout),
-  then **freezes** the sample path (stops TIM3, parks DMA1 channel 1), copies
-  the ring into an immutable snapshot, and restarts acquisition. The caller
-  reads a consistent window that DMA can no longer modify.
-- An **ADC1 ownership token** (`app/adc_owner.c`) makes the acquisition engine
-  and the front-panel ladder reader explicitly arbitrate ADC1: the ladder is
-  read during a short bounded acquisition pause (`acq_pause()`/`acq_resume()`),
-  because this clone's injected ADC group does not convert (JSWSTART sets JEOC
-  but JDR1..3 stay at zero).
+- **ADC1 channel 2 (PA2)** is the signal and analog-watchdog channel.
+- **DMA1 channel 1** runs circular into a 1024-sample ring.
+- **TIM3 TRGO** paces conversions.
+- `acq_cycle()` arms/waits (bounded), captures post-fill, freezes, snapshots, and restarts; the frozen snapshot is immutable for consumers.
+- ADC ownership is arbitrated for ladder reads/engine use as required by the board.
 
-## Trigger system
+## Trigger and anchoring (B4.36)
 
-- **Hardware event:** ADC1 analog watchdog (AWD), one channel, one-sided band
-  with hysteresis (`ACQ_TRIGGER_HYST = 8` counts):
-  - rising → `LTR = 0`, `HTR = level + hyst` (fires on a rise out of the band)
-  - falling → `LTR = level − hyst`, `HTR = 4095` (fires on a fall)
-  
-  A two-sided band would latch on the first conversion after arming whenever
-  the signal rests outside it, giving random phase. The one-sided band gives
-  genuine edge-direction selectivity.
-- **Re-arm:** before arming, `acq_cycle()` waits (bounded) for the input to be
-  on the rearm side of the threshold, so the first conversion after arming
-  cannot re-latch a spurious crossing.
-- **ISR latch:** `ADC1_2_IRQHandler` → `acq_isr_adc()` latches the buffer write
-  position at ISR entry and disables AWDIE (one-shot latch, no interrupt storm
-  on a standing out-of-window signal). The latched index lags the true
-  crossing by the ADC-to-ISR latency (open item U-04b — measure against a
-  known square before trusting sub-sample placement).
-- **Software edge refinement** (`app/trigger.c`): a Schmitt state machine with
-  rearm-and-cross hysteresis scans a window centred on the hardware event and
-  selects the crossing nearest to it (rising/falling/selectable slope).
-- **Policy FSM** (`trig_fsm_action`): AUTO (fall back to newest samples on
-  timeout), NORM (hold until a trigger), SINGLE (one triggered window then
-  hold).
-- **Trigger-aligned averaging** (1/2/4/8) and HOLD/recalled waveform display.
+- **Hardware event:** ADC1 analog watchdog (AWD), single channel, one-sided band with hysteresis (`ACQ_TRIGGER_HYST = 8`), slope-selective by banding.
+- **Re-arm:** bounded wait for rearm-side condition before enabling AWDIE to avoid immediate re-latch on a standing out-of-window signal.
+- **ISR latch:** one-shot AWD handling latches the ring index/count context for the capture.
+- **Span-bounded edge anchoring (`app/acq_anchor.c`, `app/trigger.c`, `app/acq_window.c`):**
+  - Local pass around the hardware latch (historic window/parity for healthy latches), nearest requested-slope edge.
+  - Recovery pass only when local fails: searches behind the latch within a span-bounded limit derived from the measured post-fill span (disabled on ETS ranges), taking the nearest hysteresis-qualified edge.
+  - Effective span is validated (`acq_win_span_ok`) before publication. Unpublishable/rejected captures are not presented as aligned frames (policy differs by mode: NORM hold, SINGLE re-arm, AUTO tail refresh).
+  - This fixes the B4.36 failure mode where a late AWD latch placed the true edge outside the local window and the raw mid-plateau index was published.
+- **Policy FSM:** AUTO (timeout/fallback behaviour), NORM (hold until trigger), SINGLE (one capture then park/re-arm semantics).
+- **Coherent diagnostics:** a latched per-capture diagnostic snapshot (GETV latch protocol) provides consistent HW index/count, anchor, fallback, span, and context fields.
 
-Known limitation: the 50 µs/div rising-edge path has a deterministic
-misalignment under investigation (falling edge verified aligned). See
-`docs/FEATURES.md` and `docs/trigger_timing_characterisation.md`.
+B4.36 hardware validation (41320, 50 µs/div rise/fall, tb6/tb9) showed correct alignment in the tested campaign; on that run local anchoring sufficed (recovery path not exercised) and remains host-validated for late-latch cases.
 
-## Timebase
+## Timebase and ETS
 
-- 24 steps of the 1-2-5 sequence, index 0 = 1 µs/div … index 23 = 50 s/div
-  (the full published range extends to 500 s/div, but the firmware caps at
-  50 s/div because slower ranges make synchronous capture/UI impractical at
-  10 divisions/window).
-- Each step carries baked `(PSC, ARR)` for the 64 MHz TIM3 tick, error-free in
-  integers.
-- Indices 0–4 (1–20 µs/div) need a sample interval shorter than one ADC
-  conversion (1.3125 µs), so they require **equivalent-time / repetitive (ETS/REPT)**
-  sampling which the engine does not implement. They are flagged
-  `single_shot == 0` and `acq_set_timebase()` rejects them rather than pacing
-  TIM3 faster than the ADC can convert. Index 5 (50 µs/div) is the first
-  physically usable single-shot rate.
-- Per-range ADC sample-time selection: shortest aperture that still settles
-  (7.5 cycles normally; 1.5 cycles only on the fastest single-shot range).
+- 24-step 1-2-5 table (1 µs/div … 50 s/div). TB5+ are real-time single-shot ranges; TB0–TB4 are equivalent-time (ETS/REPT) ranges (sample interval below a single ADC conversion at those settings).
+- ETS accumulation/reconstruction logic and diagnostics are implemented and host-tested. B4.32 hardware evidence (12066, B2 Amendment A + B-REC) showed range/waveform-dependent results (TB4 ready/coverage met in captured coherent evidence for fast undersampled square; TB2/TB3 below 80-bin gate in captured windows; TB0/TB1 coverage-limited per B-REC; AC-2 not tested). ETS was not re-campaigned on 41320.
+- Per-range/sample-time and timing policies are encoded in timebase/acquisition logic; behaviour should be treated as evidenced per range/campaign.
 
 ## Measurements
 
-Pure integer maths, no floating point, no `malloc` in the sampling path (the
-F1 has no FPU):
-
-- `min`, `max`, `Vpp`, `mean`, `RMS` over a window, using 64-bit sums
-  (1024 × 4095² does not fit in 32 bits) and a bit-by-bit integer square root.
-- `Vpp` is shown on the panel; RMS/frequency/duty are computed by `measure.c`
-  but not all displayed (product-parity gap).
-- Frequency/duty use a midpoint + hysteresis edge detector with a
-  timebase-derived period; they require a measurable periodic signal — bench
-  validation required.
+Pure integer maths (no FPU): min/max/Vpp/mean/RMS and derived values over windows, with 64-bit sums where needed. Some measurements are computed but not all are fully surfaced in the UI/product feature set.
 
 ## Calibration and persistence
 
-Reserved flash (never erased by image writes):
+Reserved flash regions (never erased by image writes):
 
 | Range | Owner |
 |-------|-------|
-| 0x0800E800..0x0800EBFF | waveform save slot 0 (CRC, 256 samples) |
-| 0x0800EC00..0x0800EFFF | waveform save slot 1 (CRC, 256 samples) |
-| 0x0800F000..0x0800F3FF | settings slot A (alternating, CRC record) |
-| 0x0800F400..0x0800F7FF | settings slot B (alternating, CRC record) |
-| 0x0800F800..0x0800FBFF | calibration page (40-byte CRC record: base offset/gain + 9-entry per-sensitivity zero table) |
+| 0x0800E800..0x0800EBFF | waveform save slot 0 (CRC) |
+| 0x0800EC00..0x0800EFFF | waveform save slot 1 (CRC) |
+| 0x0800F000..0x0800F3FF | settings slot A (CRC/sequence) |
+| 0x0800F400..0x0800F7FF | settings slot B (CRC/sequence) |
+| 0x0800F800..0x0800FBFF | calibration page (CRC record) |
 | 0x0800FC00..0x0800FFFF | vendor device record — NEVER written |
 
-Settings and calibration each use two alternating slots with magic, version,
-sequence number and CRC-16/CCITT-FALSE, so a torn write always leaves the
-previous valid record intact. The calibration record is CRC-checked on read.
-
-**Not yet applied:** the base offset/gain pair is stored and editable but does
-not yet change the volts/div label or Vpp number — applying it needs a measured
-reference to fix the divider ratio.
+Settings/calibration use CRC/version/sequence/alternating-slot schemes for robustness. Base calibration data is stored but absolute volts/div scaling is not fully applied.
 
 ## PC-link protocol (UART)
 
-The DSO183 USB socket is power-only, so host communication goes over the
-console UART: **USART1, PA9 TX / PA10 RX, 115200 8N1, 3.3 V**.
+**USART1, PA9 TX / PA10 RX, 115200 8N1, 3.3 V.** CRC-16/CCITT-framed commands/replies and sample streaming.
 
-### Framing (both directions)
-
-```
-offset  size  field
-0       2     preamble 0xA5 0x5A
-2       1     type       (0x01 = sample frame, 0x02 = command, 0x03 = reply)
-3       1     sequence   (wraps)
-4       2     payload length n, little-endian
-6       n     payload
-6+n     2     CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over
-              type..payload, little-endian
-```
-
-`link_crc16("123456789") == 0x29B1`.
-
-### Commands (type 0x02, 10-byte packets)
-
-`A5 5A | 0x02 | seq | op | arg_lo | arg_hi | crc_lo | crc_hi`
-
-| Opcode | Name | Argument | Behaviour |
-|--------|------|----------|-----------|
-| 0x00 | NOP | — | replies OK (link check) |
-| 0x01 | SET_TIMEBASE | 0..26 (only 5..26 accepted) | `acq_set_timebase()` |
-| 0x02 | SET_TRIGGER | 0..4095 | `acq_set_trigger_level()` |
-| 0x03 | SET_SPAN | 16..4095 | display span |
-| 0x04 | RUN | — | leave HOLD, acquisition continues |
-| 0x05 | STOP | — | HOLD: freeze the displayed frame |
-| 0x06 | GET_STATUS | — | replies current op/timebase index |
-| 0x07 | STREAM | 0/1 | binary frame bursts instead of text |
-
-Replies (type 0x03) echo `seq` and `op`, carry a status word and a value,
-and are validated against `link_cmd_arg_valid()` before dispatch — out-of-range
-arguments return `BAD_ARG` instead of being silently clamped.
-
-### Sample streaming (type 0x01)
-
-While STREAM is on, the instrument emits one binary sample frame per
-acquisition (~17.7 frames/s at 115200 baud with 256-sample frames, close to
-the UART ceiling of ~22 frames/s). The text console is suppressed while
-streaming so the stream stays binary-clean.
+- Commands include NOP, SET_TIMEBASE, SET_TRIGGER, SET_SPAN, RUN, STOP, GET_STATUS, STREAM, GET_VALUE, etc., with argument validation.
+- GET_VALUE exposes status, measurements, and diagnostic indices (including coherent trigger/ETS diagnostics via the latch protocol added in B4.36).
+- Streaming emits binary sample frames; console text is suppressed while streaming for binary cleanliness.
 
 ## Display and UI
 
-- Zero framebuffer: all rendering writes directly to ILI9341 GRAM.
-- 320×240 landscape, 10×8 dotted graticule (dots every 4 px, ~81% less bus
-  traffic than a solid grid).
-- Adafruit GFX 5×7 glyph font streamed to GRAM via a zero-RAM iterator
-  (`glyph_init`/`glyph_next`).
-- Persistent header: RUN/HOLD badge, trigger mode/slope/level, TRIG'D/WAIT,
-  link status, firmware identity (`B=4453424D S=xxxx`).
-- Two-row footer: CH1 scale/coupling/timebase/frequency; measurement bar or
-  quick-focus guidance.
-- Four-button non-modal navigation: SEL cycles focus, +/− adjust, OK toggles
-  RUN/HOLD, SEL-hold opens/closes menu.
-- SYSTEM DIAG: build identity, boot counter, loop/heartbeat, display ID,
-  ADC raw channels, decoded switch positions, error register.
+- Direct-to-GRAM rendering on 320×240 ILI9341-compatible panel (no framebuffer).
+- Graticule, trace, header/footer/status elements, menu and diagnostics screens as implemented.
+- UI/product parity is incomplete relative to stock in several areas (see `docs/FEATURES.md`).
 
-## Module boundaries (host-testable)
+## Module boundaries (host-testable where noted)
 
-`app/acq.c/.h`, `app/trigger.c/.h`, `app/timebase.c/.h`, `app/measure.c/.h`,
-`app/waveform.c/.h`, `app/render.c/.h`, `app/frame.c/.h`, `app/cal.c/.h`,
-`app/cal_table.c/.h`, `app/link.c/.h`, `app/link_cmd.c/.h`, `app/crc16.c/.h`,
-`app/continuity.c/.h`, `app/runstate.c/.h`, `app/settings.c/.h`,
-`app/ladder.c/.h`, `app/diag.c/.h`, `app/bench.c/.h`, `fonts/glyph.c/.h`.
+Pure/logic and widely tested modules include: `app/acq_anchor.c/.h`, `app/acq_window.c/.h`, `app/trigger.c/.h`, `app/timebase.c/.h`, `app/measure.c/.h`, `app/frame.c/.h`, `app/cal.c/.h`, `app/link.c/.h`, `app/link_cmd.c/.h`, `app/crc16.c/.h`, ETS/epoch/phase/source modules, and others under `tests/`.
 
-Hardware-only: `app/main.c`, `app/board_*.c`, `app/stm32f1xx_it.c`,
-`drivers/display/ili9341.{c,h}`, the vendored HAL and CMSIS, `startup/`,
-`linker/`.
+Hardware-integrated / limited host coverage: `app/main.c`, `app/acq.c` (engine/HAL), `app/menu.c`, board/display/HAL glue.
 
 ## Open architectural items
 
-- ADC1 signal channel (PA2) confirmed in the vendor binary and read live, but
-  its landing point as the physical BNC input is an open bench item.
-- Ladder channel mapping is vendor-derived; bench re-confirmation pending.
-- Pushbutton pin unknown (PA8 is the leading candidate; unproven).
-- Equivalent-time sampling not implemented (indices 0–4 not physically usable).
-- No host tests yet for `acq.c`, `menu.c`, or HAL-level modules.
+- Signal input physical landing (PA2/ADC ch2) and ladder mapping are bench-derived/vendor-derived and should be re-confirmed on other units.
+- ETS performance is range/waveform dependent; TB0–TB4 are not blanket-validated.
+- Absolute calibration scaling not fully applied to displayed volts.
+- RAM headroom is limited (~91% on 41320).
+- Single-instrument hardware evidence.
