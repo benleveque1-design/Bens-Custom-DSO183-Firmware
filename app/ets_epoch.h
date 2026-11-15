@@ -59,7 +59,7 @@ struct ets_epoch_context {
 
 struct ets_epoch {
     uint32_t sum[ETS_EPOCH_WINDOW];
-    uint16_t cnt[ETS_EPOCH_WINDOW];   /* samples per bin (u16 saturating)   */
+    uint8_t  cnt[ETS_EPOCH_WINDOW];   /* samples per bin (saturating, <=16 per epoch) */
     uint16_t sweeps;                  /* accepted, 0..ETS_EPOCH_SWEEPS_TARGET */
     uint16_t rejected;                /* saturating                         */
     uint16_t filled;                  /* bins with cnt > 0, 0..WINDOW       */

@@ -61,8 +61,9 @@ design mockups, not screenshots.
 > on real hardware. It is not yet feature-complete compared with the stock
 > firmware, and it is not a commercial product. The
 > [`v0.1.0`](https://github.com/benleveque1-design/Bens-Custom-DSO183-Firmware/releases/tag/v0.1.0)
-> tag is the first public baseline; the current `main` branch contains newer work
-> (B4.36) and has not been tagged as a new release.
+> tag is the first public baseline; `main`/working-tree state includes newer
+> validated work (B4.36, and a B4.40 candidate documented below) and has not
+> been tagged as a new release.
 
 ### B4.36 hardware milestone (build 41320)
 
@@ -113,6 +114,17 @@ the concise validation record is
 campaign validator is [`tools/validate_b436.py`](tools/validate_b436.py).
 
 </details>
+
+### B4.40 candidate (validated on tested instrument, not tagged/released)
+
+On 15 November 2026, an audited B4.37/B4.38 RAM-optimisation candidate (build **58810**) was deployed to the tested DSO183 and hardware-validated (uncommitted/unreleased working-tree state).
+
+- **Identity/resources:** seq `58810` (`0xE5BA`), bin 40,904 B SHA-256 `00a1e11d…abba`, elf SHA-256 `d5b21402…ea7b`, flash 40,900/61,440 B (66%), RAM 16,184/20,480 B (79%). See [`evidence/B4_40_DEPLOY_AND_VALIDATION_20261115T202159Z/EVIDENCE_INDEX.md`](evidence/B4_40_DEPLOY_AND_VALIDATION_20261115T202159Z/EVIDENCE_INDEX.md).
+- **Deployment:** `tools/flash_cycle.py` only (page-wise, page 0 last, per-page + whole-image readback verified, identity confirmed); UART `BUILD_SEQ 58810`, `STATUS 1`.
+- **Trigger campaign:** 12 configs × 50 captures = **600/600 coherent**, `no_frame=0`, `diag_not_ok=0`; requested crossings within ±2 of index 96 incl. 50 µs rising AUTO/NORM, comparable to B4.36 (41320) on equivalent acceptance criteria.
+- **Host tests:** preserved `make test` log records suite pass lines with no recorded failures in the preserved output (no aggregate summary line explicitly present in that log).
+- **Limitations (must remain stated):** ETS sampled only (TB0–TB4+; range/waveform-dependent) — **not** full HW validation/equivalence; TB0/TB2 showed zero frames in a short 6-attempt sampling window but non-zero ETS diagnostic/counter activity. On-device display rendering/smoothing/differential redraw not visually verified remotely.
+- **Reports:** [`B4_40_DEPLOYMENT_AND_VALIDATION_REPORT.md`](B4_40_DEPLOYMENT_AND_VALIDATION_REPORT.md), [`B4_41_POST_DEPLOYMENT_AUDIT_REPORT.md`](B4_41_POST_DEPLOYMENT_AUDIT_REPORT.md), [`B4_42_RELEASE_READINESS_REPORT.md`](B4_42_RELEASE_READINESS_REPORT.md).
 
 ### How to read the verification labels
 

@@ -75,7 +75,7 @@ void ets_epoch_add(struct ets_epoch *e, uint16_t bin, uint16_t value)
     if ((e == NULL) || (bin >= ETS_EPOCH_WINDOW)) {
         return;
     }
-    if (e->cnt[bin] == 0xFFFFU) {
+    if (e->cnt[bin] == 0xFFU) {
         return;                    /* saturate instead of wrapping a bin */
     }
     if (e->cnt[bin] == 0U) {

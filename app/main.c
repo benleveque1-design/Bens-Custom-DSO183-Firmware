@@ -233,7 +233,10 @@ static struct acq_diag s_diag_pub;  /* latched: written by GETV_DIAG_LATCH      
 #define BENCH_PRE           96U   /* 30% pre-trigger, matches TRIG_PRE_TRIGGER */
 #define BENCH_TIMEOUT_MS  1000U
 #define BENCH_DUMP_SAMPLES   8U
-#define TRIG_SEARCH_LEN    512U   /* software edge-refinement search window */
+/* ETS transient sweep buffer size: trig_anchor() scans the ring in place, so
+ * this union lane only needs one BENCH_WINDOW sample buffer for ETS
+ * accumulation/reconstruction (see s_acq_scratch contract below). */
+#define TRIG_SEARCH_LEN    BENCH_WINDOW
 
 static uint16_t s_frame[BENCH_WINDOW];
 /* Shared transient scratch (M3 RAM optimisation).
@@ -257,7 +260,6 @@ static union {
 _Static_assert(TRIG_SEARCH_LEN >= BENCH_WINDOW,
                "ETS tmpbuf alias requires trig_search >= BENCH_WINDOW");
 static uint8_t  s_acq_ok;
-static uint16_t s_means[UI_PLOT_W];
 static uint16_t s_disp[UI_PLOT_W];
 static uint8_t  s_disp_valid;
 static uint8_t  s_scope_first = 1U;
@@ -707,13 +709,13 @@ static void diag_snapshot(struct diag_state *st)
  * updated differentially (erase pixels leaving the trace, draw pixels
  * entering it) before the grid is repainted.  Header and footer are
  * redrawn only when their contents change. */
-static uint16_t s_prev_lo[UI_PLOT_W];
-static uint16_t s_prev_hi[UI_PLOT_W];
-static uint16_t s_cur_lo[UI_PLOT_W];
-static uint16_t s_cur_hi[UI_PLOT_W];
+static uint8_t  s_prev_lo[UI_PLOT_W];
+static uint8_t  s_prev_hi[UI_PLOT_W];
+static uint8_t  s_cur_lo[UI_PLOT_W];
+static uint8_t  s_cur_hi[UI_PLOT_W];
 static uint16_t s_prev_ncols;
-static uint16_t s_prev_trig_y;
-static uint16_t s_prev_ground_y;
+static uint8_t  s_prev_trig_y;
+static uint8_t  s_prev_ground_y;
 static uint8_t  s_scope_has_prev;
 static uint8_t  s_scope_plot_cleared;
 static uint8_t  s_prev_guide_valid;
@@ -1408,41 +1410,72 @@ static void scope_draw(const struct frame *f)
         s_disp_valid = 0U;
     }
 
-    ncols = wave_column_means(s_frame, f->length, UI_PLOT_W, s_means, UI_PLOT_W);
+    {
+        uint16_t n = f->length;
+        uint16_t cols = UI_PLOT_W;
 
-    if (s_cpl == 2U) {
-        ncols = 0U;              /* GND: flat baseline, no waveform */
-    } else if (s_disp_valid == 0U) {
-        for (i = 0U; i < ncols; i++) {
-            int32_t v = (int32_t)s_means[i] + shift;
-            if (v < 0) { v = 0; } else if (v > 4095) { v = 4095; }
-            s_disp[i] = (uint16_t)v;
-        }
-        s_disp_valid = 1U;
-    } else {
-        /* Temporal smoothing to reduce noise/jaggedness.  With the trigger
-         * now anchored to the hardware event successive frames land on the
-         * same phase, so this does not blend two positions into a ghost
-         * trace.  Large changes (signal appears/disappears, vertical shift)
-         * must track quickly or the trace "builds" and "fades" over seconds,
-         * so use a fast alpha when the step is big and a gentle one for the
-         * small sample-to-sample noise on a steady trace. */
-        for (i = 0U; i < ncols; i++) {
-            int32_t v = (int32_t)s_means[i] + shift;
-            int32_t diff;
+        if ((s_frame == NULL) || (n == 0U) || (cols == 0U)) {
+            ncols = 0U;
+        } else {
+            ncols = cols;
+            if (s_cpl == 2U) {
+                ncols = 0U;              /* GND: flat baseline, no waveform */
+            } else if (s_disp_valid == 0U) {
+                for (i = 0U; i < ncols; i++) {
+                    uint32_t start = ((uint32_t)i * n) / ncols;
+                    uint32_t end   = ((uint32_t)(i + 1U) * n) / ncols;
+                    uint32_t sum   = 0U;
+                    uint32_t count;
+                    int32_t  v;
 
-            if (v < 0) { v = 0; } else if (v > 4095) { v = 4095; }
-            diff = v - (int32_t)s_disp[i];
-            if (diff < 0) { diff = -diff; }
-            if (diff > 64) {
-                /* Big move: follow immediately (keeps transitions crisp). */
-                s_disp[i] = (uint16_t)v;
-            } else if (diff > 16) {
-                /* Moderate: 50/50 to settle quickly. */
-                s_disp[i] = (uint16_t)(((uint32_t)s_disp[i] + (uint32_t)v + 1U) / 2U);
+                    if (end <= start) { end = start + 1U; }
+                    if (end > n) { end = n; }
+                    count = end - start;
+                    while (start < end) {
+                        sum += s_frame[start++];
+                    }
+                    v = (int32_t)((uint16_t)((sum + count / 2U) / count)) + shift;
+                    if (v < 0) { v = 0; } else if (v > 4095) { v = 4095; }
+                    s_disp[i] = (uint16_t)v;
+                }
+                s_disp_valid = 1U;
             } else {
-                /* Steady-state noise: gentle smoothing. */
-                s_disp[i] = (uint16_t)(((uint32_t)s_disp[i] * 3U + (uint32_t)v + 2U) / 4U);
+                /* Temporal smoothing to reduce noise/jaggedness.  With the trigger
+                 * now anchored to the hardware event successive frames land on the
+                 * same phase, so this does not blend two positions into a ghost
+                 * trace.  Large changes (signal appears/disappears, vertical shift)
+                 * must track quickly or the trace "builds" and "fades" over seconds,
+                 * so use a fast alpha when the step is big and a gentle one for the
+                 * small sample-to-sample noise on a steady trace. */
+                for (i = 0U; i < ncols; i++) {
+                    uint32_t start = ((uint32_t)i * n) / ncols;
+                    uint32_t end   = ((uint32_t)(i + 1U) * n) / ncols;
+                    uint32_t sum   = 0U;
+                    uint32_t count;
+                    int32_t  v;
+                    int32_t  diff;
+
+                    if (end <= start) { end = start + 1U; }
+                    if (end > n) { end = n; }
+                    count = end - start;
+                    while (start < end) {
+                        sum += s_frame[start++];
+                    }
+                    v = (int32_t)((uint16_t)((sum + count / 2U) / count)) + shift;
+                    if (v < 0) { v = 0; } else if (v > 4095) { v = 4095; }
+                    diff = v - (int32_t)s_disp[i];
+                    if (diff < 0) { diff = -diff; }
+                    if (diff > 64) {
+                        /* Big move: follow immediately (keeps transitions crisp). */
+                        s_disp[i] = (uint16_t)v;
+                    } else if (diff > 16) {
+                        /* Moderate: 50/50 to settle quickly. */
+                        s_disp[i] = (uint16_t)(((uint32_t)s_disp[i] + (uint32_t)v + 1U) / 2U);
+                    } else {
+                        /* Steady-state noise: gentle smoothing. */
+                        s_disp[i] = (uint16_t)(((uint32_t)s_disp[i] * 3U + (uint32_t)v + 2U) / 4U);
+                    }
+                }
             }
         }
     }
@@ -1455,8 +1488,8 @@ static void scope_draw(const struct frame *f)
             if (py < lo) lo = py;
             if (py > hi) hi = py;
         }
-        s_cur_lo[i] = lo;
-        s_cur_hi[i] = hi;
+        s_cur_lo[i] = (uint8_t)lo;
+        s_cur_hi[i] = (uint8_t)hi;
     }
 
     /* erase the previous trigger guide before the grid is repainted */
@@ -1471,7 +1504,7 @@ static void scope_draw(const struct frame *f)
          * twice and contributed to the visible "rebuilding" sweep. */
         for (i = 0U; i < s_prev_ncols; i++) {
             uint16_t plo = s_prev_lo[i], phi = s_prev_hi[i];
-            uint16_t clo = (i < ncols) ? s_cur_lo[i] : 0xFFFFU;
+            uint16_t clo = (i < ncols) ? s_cur_lo[i] : 0U;
             uint16_t chi = (i < ncols) ? s_cur_hi[i] : 0U;
             if ((i >= ncols) || (phi < clo) || (plo > chi)) {
                 ili9341_fill_rect((uint16_t)(UI_PLOT_X + i), plo, 1U,
@@ -1496,7 +1529,7 @@ static void scope_draw(const struct frame *f)
         uint16_t w = ((uint16_t)(UI_PLOT_W - i) > 6U) ? 6U : (uint16_t)(UI_PLOT_W - i);
         ili9341_fill_rect((uint16_t)(UI_PLOT_X + i), trig_y, w, 1U, UI_C_TRIG);
     }
-    s_prev_trig_y = trig_y;
+    s_prev_trig_y = (uint8_t)trig_y;
     s_prev_guide_valid = 1U;
 
     /* trace over the grid (and track it for differential erase). */
@@ -1508,8 +1541,8 @@ static void scope_draw(const struct frame *f)
             ili9341_fill_rect(UI_PLOT_X, prev_ground, UI_PLOT_W, 1U, UI_C_BG);
         }
         ili9341_fill_rect(UI_PLOT_X, ground_y, UI_PLOT_W, 1U, UI_C_TRACE);
-        s_prev_lo[0] = ground_y;
-        s_prev_hi[0] = ground_y;
+        s_prev_lo[0] = (uint8_t)ground_y;
+        s_prev_hi[0] = (uint8_t)ground_y;
         s_prev_ncols = 1U;
     } else {
         for (i = 0U; i < ncols; i++) {
@@ -1520,7 +1553,7 @@ static void scope_draw(const struct frame *f)
         }
         s_prev_ncols = ncols;
     }
-    s_prev_ground_y = ground_y;
+    s_prev_ground_y = (uint8_t)ground_y;
     s_scope_has_prev = 1U;
 
     ui_plot_margins(ground_y, trig_y);
