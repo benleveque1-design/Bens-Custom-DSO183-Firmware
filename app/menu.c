@@ -35,6 +35,7 @@ extern uint8_t s_trig_slope;
 #include "ili9341.h"
 #include "ui.h"
 #include "status.h"
+#include "menu_logic.h"
 
 #include "stm32f1xx_hal.h"
 #include <stdio.h>
@@ -210,39 +211,10 @@ void menu_button_tick(void)
     s_btn_stable = raw;
 }
 
-static enum menu_state menu_next(enum menu_state s)
-{
-    switch (s) {
-    case MENU_NONE:           return MENU_TIMEBASE;
-    case MENU_TIMEBASE:       return MENU_TRIGGER_MODE;
-    case MENU_TRIGGER_MODE:   return MENU_TRIGGER_LEVEL;
-    case MENU_TRIGGER_LEVEL:  return MENU_TRIGGER_SLOPE;
-    case MENU_TRIGGER_SLOPE:  return MENU_CAL_ZERO;
-    case MENU_CAL_ZERO:       return MENU_CAL_OFFSET;
-    case MENU_CAL_OFFSET:     return MENU_CAL_GAIN;
-    case MENU_CAL_GAIN:       return MENU_WAVE_SAVE;
-    case MENU_WAVE_SAVE:      return MENU_WAVE_LOAD;
-    case MENU_WAVE_LOAD:      return MENU_MEAS_MODE;
-    case MENU_MEAS_MODE:      return MENU_CAL_RST;
-    case MENU_CAL_RST:        return MENU_DEFAULTS;
-    case MENU_DEFAULTS:       return MENU_DISPLAY;
-    case MENU_DISPLAY:        return MENU_SYS_DIAG;
-    case MENU_SYS_DIAG:       return MENU_TIMEBASE;
-    default:                  return MENU_NONE;
-    }
-}
-
 static void menu_note(struct menu *m, const char *text, uint32_t now)
 {
     (void)snprintf(m->note, sizeof m->note, "%s", text);
     m->note_ms = now;
-}
-
-static int32_t clamp32(int32_t v, int32_t lo, int32_t hi)
-{
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
 }
 
 /* One step of the current page: +1 forward, -1 backward. */
@@ -250,13 +222,8 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
 {
     switch (m->state) {
     case MENU_TIMEBASE: {
-        int32_t idx = (int32_t)m->timebase_idx + dir;
-
-        if (idx < 0) {
-            idx = (int32_t)TIMEBASE_COUNT - 1;
-        } else if (idx >= (int32_t)TIMEBASE_COUNT) {
-            idx = 0;
-        }
+        int32_t idx = menu_logic_step_index_wrap((int32_t)m->timebase_idx, dir,
+                                                 (int32_t)TIMEBASE_COUNT);
         if (acq_set_timebase((uint8_t)idx) == ACQ_OK) {
             m->timebase_idx = (uint8_t)idx;
             m->dirty = 1U;
@@ -265,11 +232,8 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
         break;
     }
     case MENU_TRIGGER_MODE: {
-        int32_t mode = ((int32_t)m->trigger_mode + dir) % 3;
+        int32_t mode = menu_logic_step_mod((int32_t)m->trigger_mode, dir, 3);
 
-        if (mode < 0) {
-            mode += 3;
-        }
         if (acq_set_trigger_mode((uint8_t)mode) == ACQ_OK) {
             if (mode == (int32_t)TRIG_MODE_SINGLE) {
                 (void)acq_trigger_arm();
@@ -281,8 +245,8 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
         break;
     }
     case MENU_TRIGGER_LEVEL: {
-        int32_t level = clamp32((int32_t)m->trigger_level + (dir * 64),
-                                0, 4095);
+        int32_t level = menu_logic_step_clamped((int32_t)m->trigger_level, dir,
+                                                64, 0, 4095);
 
         /* Only touch flash bookkeeping when the value really moved: at the
          * clamp limit a held button repeats every 600 ms and an
@@ -298,9 +262,8 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
         break;
     }
     case MENU_TRIGGER_SLOPE: {
-        int32_t sl = ((int32_t)s_trig_slope + dir) % 3;
+        int32_t sl = menu_logic_step_mod((int32_t)s_trig_slope, dir, 3);
 
-        if (sl < 0) { sl += 3; }
         if ((uint8_t)sl != s_trig_slope) {
             s_trig_slope = (uint8_t)sl;
             m->trigger_slope = s_trig_slope;
@@ -337,8 +300,8 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
         break;
     }
     case MENU_CAL_OFFSET: {
-        int32_t offset = clamp32(m->cal_offset_uv + (dir * 8),
-                                 -200000, 200000);
+        int32_t offset = menu_logic_step_clamped(m->cal_offset_uv, dir, 8,
+                                                 -200000, 200000);
 
         if (offset != m->cal_offset_uv) {
             struct cal c;
@@ -353,8 +316,8 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
         break;
     }
     case MENU_CAL_GAIN: {
-        int32_t gain = clamp32(m->cal_gain_q16 + (dir * 1024),
-                               16384, 262144);
+        int32_t gain = menu_logic_step_clamped(m->cal_gain_q16, dir, 1024,
+                                               16384, 262144);
 
         if (gain != m->cal_gain_q16) {
             struct cal c;
@@ -497,12 +460,8 @@ static void focus_step(struct menu *m, int dir, uint32_t now)
 {
     switch ((enum menu_focus)(m->focus % FOCUS_COUNT)) {
     case FOCUS_TIMEBASE: {
-        int32_t idx = (int32_t)m->timebase_idx + dir;
-        if (idx < 0) {
-            idx = (int32_t)TIMEBASE_COUNT - 1;
-        } else if (idx >= (int32_t)TIMEBASE_COUNT) {
-            idx = 0;
-        }
+        int32_t idx = menu_logic_step_index_wrap((int32_t)m->timebase_idx, dir,
+                                                 (int32_t)TIMEBASE_COUNT);
         if (acq_set_timebase((uint8_t)idx) == ACQ_OK) {
             m->timebase_idx = (uint8_t)idx;
             m->dirty = 1U;
@@ -511,8 +470,7 @@ static void focus_step(struct menu *m, int dir, uint32_t now)
         break;
     }
     case FOCUS_TRIGGER_MODE: {
-        int32_t mode = ((int32_t)m->trigger_mode + dir) % 3;
-        if (mode < 0) { mode += 3; }
+        int32_t mode = menu_logic_step_mod((int32_t)m->trigger_mode, dir, 3);
         if (acq_set_trigger_mode((uint8_t)mode) == ACQ_OK) {
             if (mode == (int32_t)TRIG_MODE_SINGLE) {
                 (void)acq_trigger_arm();
@@ -524,7 +482,8 @@ static void focus_step(struct menu *m, int dir, uint32_t now)
         break;
     }
     case FOCUS_TRIGGER_LEVEL: {
-        int32_t level = clamp32((int32_t)m->trigger_level + (dir * 64), 0, 4095);
+        int32_t level = menu_logic_step_clamped((int32_t)m->trigger_level, dir,
+                                                64, 0, 4095);
         if ((uint16_t)level != m->trigger_level) {
             if (acq_set_trigger_level((uint16_t)level) == ACQ_OK) {
                 m->trigger_level = (uint16_t)level;
@@ -535,8 +494,7 @@ static void focus_step(struct menu *m, int dir, uint32_t now)
         break;
     }
     case FOCUS_TRIGGER_SLOPE: {
-        int32_t sl = ((int32_t)s_trig_slope + dir) % 3;
-        if (sl < 0) { sl += 3; }
+        int32_t sl = menu_logic_step_mod((int32_t)s_trig_slope, dir, 3);
         if ((uint8_t)sl != s_trig_slope) {
             s_trig_slope = (uint8_t)sl;
             m->trigger_slope = s_trig_slope;
@@ -651,7 +609,7 @@ void menu_poll(struct menu *m)
             /* Main trace screen: SEL cycles focus, +/- adjust, OK = RUN/HOLD. */
             switch (ev) {
             case EV_SEL_PRESS:
-                m->focus = (uint8_t)((m->focus + 1U) % FOCUS_COUNT);
+                m->focus = menu_logic_focus_next(m->focus);
                 m->focus_ms = ev_ms;
                 break;
             case EV_PLUS:
@@ -675,7 +633,7 @@ void menu_poll(struct menu *m)
             /* Settings menu open: SEL next page, +/- adjust, OK action. */
             switch (ev) {
             case EV_SEL_PRESS:
-                m->state = menu_next(m->state);
+                m->state = menu_logic_next_page(m->state);
                 m->diag_open = 0U;
                 break;
             case EV_PLUS:

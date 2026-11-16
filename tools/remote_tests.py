@@ -88,10 +88,13 @@ def suite_control(client, tag: str = "") -> list:
     run("stream_off", rp.OP_STREAM, 0, rp.ST_OK, 0)
     run("get_status_not_streaming", rp.OP_GET_STATUS, 0, rp.ST_OK)
 
+    # Timebase policy: 0..(TIMEBASE_COUNT-1) valid (0-4 are ETS/REPT/fast
+    # ranges accepted by current firmware), out-of-range rejected.
+    run("set_timebase_4_rept", rp.OP_SET_TIMEBASE, 4, rp.ST_OK, 0)
     run("set_timebase_5", rp.OP_SET_TIMEBASE, 5, rp.ST_OK, 0)
-    run("set_timebase_26", rp.OP_SET_TIMEBASE, 26, rp.ST_OK, 0)
-    run("set_timebase_4_rejected", rp.OP_SET_TIMEBASE, 4, rp.ST_BAD_ARG, 0)
-    run("set_timebase_27_rejected", rp.OP_SET_TIMEBASE, 27, rp.ST_BAD_ARG, 0)
+    run("set_timebase_23", rp.OP_SET_TIMEBASE, 23, rp.ST_OK, 0)
+    run("set_timebase_24_rejected", rp.OP_SET_TIMEBASE, 24, rp.ST_BAD_ARG, 0)
+    run("set_timebase_26_rejected", rp.OP_SET_TIMEBASE, 26, rp.ST_BAD_ARG, 0)
     run("set_timebase_wrap_rejected", rp.OP_SET_TIMEBASE, 261, rp.ST_BAD_ARG, 0)
 
     run("set_trigger_2048", rp.OP_SET_TRIGGER, 2048, rp.ST_OK, 0)

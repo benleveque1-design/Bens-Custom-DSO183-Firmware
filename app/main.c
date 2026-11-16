@@ -174,6 +174,14 @@ static uint8_t s_link_seq;
 static uint8_t s_rxbuf[LINK_CMD_LEN];
 static uint8_t s_rxlen;
 
+/* Link servicing must remain responsive while acq_cycle() blocks on long,
+ * timebase-scaled waits.  Mutating commands are unsafe to execute reentrantly
+ * inside the capture path, so they are deferred (single-slot) and run after the
+ * cycle returns.  Read-only queries may be answered immediately. */
+static volatile uint8_t  s_acq_cycle_active;
+static uint8_t           s_link_pending_valid;
+static struct link_cmd   s_link_pending_cmd;
+
 static uint16_t s_meas_vpp;
 static uint16_t s_meas_vrms;
 static uint16_t s_meas_min;
@@ -608,6 +616,42 @@ static void link_handle(const struct link_cmd *cmd)
     }
 }
 
+static uint8_t link_cmd_is_readonly(const struct link_cmd *cmd)
+{
+    if (cmd == NULL) {
+        return 0U;
+    }
+    return (cmd->op == (uint8_t)LINK_OP_NOP)
+        || (cmd->op == (uint8_t)LINK_OP_GET_STATUS)
+        || (cmd->op == (uint8_t)LINK_OP_GET_VALUE);
+}
+
+static void link_dispatch_cmd(const struct link_cmd *cmd)
+{
+    if (cmd == NULL) {
+        return;
+    }
+    /* Defer mutating commands while acq_cycle() is active: executing them
+     * reentrantly would corrupt capture/DMA/TIM3 state.  Read-only queries can
+     * be answered immediately so the host does not time out during long waits.
+     * Single-slot defer keeps RAM bounded; the slot is flushed after the cycle. */
+    if ((s_acq_cycle_active != 0U) && (link_cmd_is_readonly(cmd) == 0U)) {
+        s_link_pending_cmd = *cmd;
+        s_link_pending_valid = 1U;
+        return;
+    }
+    link_handle(cmd);
+}
+
+static void link_flush_pending(void)
+{
+    if (s_link_pending_valid == 0U) {
+        return;
+    }
+    s_link_pending_valid = 0U;
+    link_handle(&s_link_pending_cmd);
+}
+
 static void link_rx_byte(uint8_t b)
 {
     if (s_rxlen == 0U) {
@@ -630,7 +674,7 @@ static void link_rx_byte(uint8_t b)
 
         s_rxlen = 0U;
         if (link_cmd_parse(s_rxbuf, (uint32_t)LINK_CMD_LEN, &cmd) != 0U) {
-            link_handle(&cmd);
+            link_dispatch_cmd(&cmd);
         }
     }
 }
@@ -644,6 +688,13 @@ static void link_poll(void)
     while (board_uart_get_byte(&byte) != 0U) {
         link_rx_byte(byte);
     }
+}
+
+static void link_service_hook(void)
+{
+    /* Called from acq_cycle() wait loops: keep protocol responsive without
+     * mutating acquisition state. */
+    link_poll();
 }
 
 static void diag_snapshot(struct diag_state *st)
@@ -1881,6 +1932,7 @@ static void acq_bench_init(void)
         }
     }
     
+    acq_set_yield_hook(link_service_hook);
     s_acq_ok = 1U;
     puts_("acq ok\r\n");
 }
@@ -2323,13 +2375,17 @@ static void acq_bench_poll(void)
 
     /* AUTO must refresh quickly; NORM/SINGLE get the full capture window.
      * Keep AUTO short so the UI/buttons stay responsive when no edge fires
-     * (e.g. signal removed) - acq_cycle blocks the main loop for up to this
-     * long.  60 ms gives ~16 fallback updates/s worst-case instead of 4. */
+     * (e.g. signal removed) - acq_cycle can block the main loop for up to
+     * timebase-scaled stages, so service the link during its waits (read-only
+     * replies immediate, mutating commands deferred) to avoid UART timeouts. */
     {
         uint32_t wait_ms = (acq_trigger_mode_get() == (uint8_t)TRIG_MODE_AUTO)
                          ? 60U : BENCH_TIMEOUT_MS;
 
+        s_acq_cycle_active = 1U;
         rc = acq_cycle(wait_ms, (uint16_t)(BENCH_WINDOW - BENCH_PRE), &gate);
+        s_acq_cycle_active = 0U;
+        link_flush_pending();
     }
     if (rc == ACQ_HW_ERROR) {
         s_acq_errors++;
