@@ -13,6 +13,7 @@
  */
 #include "status.h"
 #include "acq.h"
+#include "acq_policy.h"
 #include "ladder.h"
 #include "acq_window.h"
 #include "acq_handoff.h"
@@ -38,6 +39,8 @@ static uint16_t s_buf[ACQ_SAMPLES];       /* DMA circular target - 2 KiB */
 static uint16_t s_snap[ACQ_SAMPLES];      /* immutable snapshot - 2 KiB   */
 static uint32_t s_snap_pos;               /* write position at freeze     */
 static uint8_t  s_snap_valid;             /* 0 until the first snapshot   */
+
+static acq_yield_fn s_yield_hook;         /* main-loop service during waits */
 
 static volatile uint8_t  s_event;         /* 0 none, 1 triggered, 2 timeout */
 static volatile uint32_t s_trigger_index; /* latched watchdog position      */
@@ -101,10 +104,7 @@ _Static_assert(ACQ_SIGNAL_CHANNEL != LADDER_CH_CPL,  "signal ch clashes with CPL
  * capture from before the event can never be bound to a later sweep. */
 static void arm_generation_bump(void)
 {
-    s_arm_generation++;
-    if (s_arm_generation == 0U) {
-        s_arm_generation = 1U;      /* 0 is reserved for "never armed"    */
-    }
+    s_arm_generation = acq_policy_arm_generation_bump(s_arm_generation);
 }
 
 /* Invalidate the stored capture without racing the ISR writer.  The critical
@@ -328,6 +328,18 @@ static void adc_quiesce(void)
     }
 }
 
+static void acq_yield(void)
+{
+    if (s_yield_hook != NULL) {
+        s_yield_hook();
+    }
+}
+
+void acq_set_yield_hook(acq_yield_fn fn)
+{
+    s_yield_hook = fn;
+}
+
 /* ------------------------------------------------------------ public */
 
 void acq_isr_dma(void)
@@ -444,23 +456,13 @@ static enum acq_status pacing_resume(void)
 enum acq_status acq_set_timebase(uint8_t index)
 {
     struct tim3_config cfg;
-    const struct timebase_step *step;
     uint8_t hw_index;
 
-    step = timebase_entry(index);
-    if (step == NULL) {
+    if (acq_policy_timebase_resolve(index, &hw_index, NULL) == 0U) {
         return ACQ_PARAM;
     }
     if (s_inited == 0U) {
         return ACQ_NOT_INITED;
-    }
-    /* REPT (ETS) ranges 0..4: hardware paces at the fastest single-shot
-     * rate (50 us/div, index 5) while the logical timebase selects the
-     * equivalent-time scale.  Single-shot ranges pace directly. */
-    if (step->single_shot == 0U) {
-        hw_index = (uint8_t)TIMEBASE_FIRST_SINGLE_SHOT;
-    } else {
-        hw_index = index;
     }
     if (tim3_config_for(hw_index, &cfg) != 0U) {
         return ACQ_PARAM;
@@ -692,7 +694,7 @@ enum acq_status acq_set_trigger_level(uint16_t level)
     if (s_inited == 0U) {
         return ACQ_NOT_INITED;
     }
-    new_level = (level > 4095U) ? 4095U : level;
+    new_level = acq_policy_clamp_trigger_level(level);
     if (new_level != s_trig_level) {
         /* The ETS crossing model depends on the level. */
         arm_generation_bump();
@@ -709,7 +711,7 @@ enum acq_status acq_set_trigger_level(uint16_t level)
 
 enum acq_status acq_set_trigger_slope(uint8_t slope)
 {
-    if (slope > 2U) {
+    if (acq_policy_trigger_slope_is_valid(slope) == 0U) {
         return ACQ_PARAM;
     }
     if (s_inited == 0U) {
@@ -717,7 +719,7 @@ enum acq_status acq_set_trigger_slope(uint8_t slope)
     }
     /* AUTO ("either edge") still has to pick one direction for a repeatable
      * display; rising is the conventional choice and matches the marker. */
-    slope = (slope == 1U) ? 1U : 0U;
+    slope = acq_policy_trigger_slope_hw(slope);
     if (slope != s_trig_slope_hw) {
         s_trig_slope_hw = slope;
         /* Crossing direction changed: the ETS edge association follows. */
@@ -730,32 +732,32 @@ enum acq_status acq_set_trigger_slope(uint8_t slope)
 
 enum acq_status acq_set_trigger_mode(uint8_t mode)
 {
-    if (s_inited == 0U) {
-        return ACQ_NOT_INITED;
+    enum acq_status st;
+    uint8_t invalidate;
+
+    st = acq_policy_apply_trigger_mode(s_inited, mode, &s_trig,
+                                       &s_arm_generation, &invalidate);
+    if (st == ACQ_OK) {
+        if (invalidate != 0U) {
+            hw_capture_invalidate();
+        }
     }
-    if (mode > (uint8_t)TRIG_MODE_SINGLE) {
-        return ACQ_PARAM;
-    }
-    s_trig.mode = mode;
-    if (mode == (uint8_t)TRIG_MODE_SINGLE) {
-        s_trig.armed = 1U;      /* entering SINGLE means "capture one" */
-    }
-    /* Mode changes alter the arming policy: earlier captures belong to an
-     * earlier arm. */
-    arm_generation_bump();
-    hw_capture_invalidate();
-    return ACQ_OK;
+    return st;
 }
 
 enum acq_status acq_trigger_arm(void)
 {
-    if (s_inited == 0U) {
-        return ACQ_NOT_INITED;
+    enum acq_status st;
+    uint8_t invalidate;
+
+    st = acq_policy_trigger_arm(s_inited, &s_trig, &s_arm_generation,
+                                &invalidate);
+    if (st == ACQ_OK) {
+        if (invalidate != 0U) {
+            hw_capture_invalidate();
+        }
     }
-    trig_fsm_arm(&s_trig);
-    arm_generation_bump();
-    hw_capture_invalidate();
-    return ACQ_OK;
+    return st;
 }
 
 enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
@@ -822,6 +824,7 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
             }
             ms_delay(1U);
             board_iwdg_feed();
+            acq_yield();
         }
         s_ring_primed = 1U;
         s_resume_pos = (uint16_t)((ACQ_SAMPLES
@@ -854,6 +857,7 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
             }
             ms_delay(1U);
             board_iwdg_feed();
+            acq_yield();
         }
     }
     board_iwdg_feed();
@@ -972,6 +976,7 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
             if (now != fed_at) {
                 fed_at = now;
                 board_iwdg_feed();
+                acq_yield();
             }
             if (status_acq_hw_errors != err_before) {
                 hw_err = 1U;
@@ -1052,6 +1057,7 @@ enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
                     ms_delay(1U);
                 }
                 board_iwdg_feed();
+                acq_yield();
             }
         }
     }

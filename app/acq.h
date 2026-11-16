@@ -285,6 +285,13 @@ enum acq_status acq_trigger_arm(void);
  * With NORM/SINGLE a cycle without a usable trigger does NOT replace the
  * snapshot: gate.fresh is 0 and the caller keeps the previous frame.
  * AUTO always replaces it (headline `ACQ_TIMEOUT`, `triggered = 0`). */
+/* Optional main-loop service hook called from long, blocking waits inside
+ * acq_cycle() so the caller can service UART/link/UI housekeeping without
+ * reentering acquisition.  The hook runs in main context and MUST NOT perform
+ * operations that mutate acquisition/DMA/TIM3 state. */
+typedef void (*acq_yield_fn)(void);
+void acq_set_yield_hook(acq_yield_fn fn);
+
 enum acq_status acq_cycle(uint32_t timeout_ms, uint16_t post_samples,
                           struct acq_gate *out);
 
