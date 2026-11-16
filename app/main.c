@@ -806,38 +806,54 @@ static uint32_t ui_isqrt(uint32_t v)
     return r;
 }
 
-/* Current volts/division, in millivolts. */
+/* Current volts/division, in millivolts (nominal, from ladder selection). */
 static uint32_t ui_mv_per_div(void)
 {
     return (s_mv != 0U) ? (uint32_t)s_mv : 100U;
 }
 
-/* Convert a signed ADC-count difference to millivolts using the scale that
- * the trace itself is drawn with (8 divisions across s_span counts). */
+/* Convert a signed ADC-count difference to millivolts using the nominal
+ * scale the trace is drawn with (8 divisions across s_span counts).  Pure
+ * formula delegated to ui_counts_to_mv_scale() with production-resolved
+ * parameters to preserve existing behaviour exactly. */
 static int32_t ui_counts_to_mv(int32_t counts)
 {
-    uint32_t span = (s_span != 0U) ? (uint32_t)s_span : 4095U;
-    int64_t mv = ((int64_t)counts * (int64_t)ui_mv_per_div() * 8) / (int64_t)span;
-    return (int32_t)mv;
+    uint16_t span = (s_span != 0U) ? s_span : 4095U;
+    uint16_t mv_div = (uint16_t)ui_mv_per_div();
+
+    return ui_counts_to_mv_scale(counts, span, mv_div);
 }
 
-/* 0 V reference for the current frame: the stored zero for the decoded
- * sensitivity combo, else the frame mean (the vendor assumes mid-scale). */
+/* 0 V reference for the current frame (DC/GND): the stored zero for the
+ * decoded sensitivity combo when present, else the frame mean. */
 static uint16_t ui_zero_ref(uint16_t mean)
 {
+    uint8_t use_zero = 0U;
+    uint16_t stored_zero = 0U;
+
     if ((s_combo_valid != 0U)
         && (cal_table_present(cal_table_active(), s_combo_idx) != 0U)) {
-        return cal_table_zero(cal_table_active(), s_combo_idx);
+        use_zero = 1U;
+        stored_zero = cal_table_zero(cal_table_active(), s_combo_idx);
     }
-    return mean;
+    return ui_display_ref(mean, stored_zero, use_zero, 0U);
 }
 
+/* Display reference for the current frame/coupling mode. */
 static uint16_t ui_frame_ref(uint16_t mean)
 {
-    if (s_cpl == 1U) {
-        return mean;                 /* AC: trace is mean-removed */
+    uint8_t ac_coupled = (s_cpl == 1U) ? 1U : 0U;
+    uint8_t use_zero = 0U;
+    uint16_t stored_zero = 0U;
+
+    if (ac_coupled == 0U) {
+        if ((s_combo_valid != 0U)
+            && (cal_table_present(cal_table_active(), s_combo_idx) != 0U)) {
+            use_zero = 1U;
+            stored_zero = cal_table_zero(cal_table_active(), s_combo_idx);
+        }
     }
-    return ui_zero_ref(mean);
+    return ui_display_ref(mean, stored_zero, use_zero, ac_coupled);
 }
 
 static void ui_fmt_unsigned_mv(char *b, size_t n, uint32_t mv)
