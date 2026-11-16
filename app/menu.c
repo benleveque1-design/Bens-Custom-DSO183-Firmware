@@ -386,9 +386,14 @@ static void menu_ok(struct menu *m, uint32_t now)
         m->cal_offset_uv = 0;
         m->cal_gain_q16 = 65536;
         (void)cal_table_clear_all(cal_table_mutable());
-        m->dirty_cal = 1U;
-        m->last_change_ms = now;
-        menu_note(m, "Cal reset done", now);
+        if (cal_store_write(cal_active()) == 0U) {
+            m->dirty_cal = 0U;
+            menu_note(m, "Cal reset done", now);
+        } else {
+            m->dirty_cal = 1U;
+            m->last_change_ms = now;
+            menu_note(m, "Cal reset fail", now);
+        }
         break;
     case MENU_DEFAULTS: {
         struct settings ds;

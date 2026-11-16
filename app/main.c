@@ -430,18 +430,34 @@ static uint8_t op_cal_set_gain_x1000(uint16_t g)
 static uint8_t op_cal_save(void)
 {
     /* Persist base cal; cal_store packs the live table state as well. */
-    return (cal_store_write(cal_active()) == 0U) ? 1U : 0U;
+    if (cal_store_write(cal_active()) == 0U) {
+        s_menu.dirty_cal = 0U;
+        return 1U;
+    }
+    /* Ensure a failed explicit save schedules menu_persist retry. */
+    s_menu.dirty_cal = 1U;
+    s_menu.last_change_ms = HAL_GetTick();
+    return 0U;
 }
 
 static uint8_t op_cal_reset(void)
 {
+    uint32_t now = HAL_GetTick();
+
     cal_active_set(&cal_identity);
     (void)cal_table_clear_all(cal_table_mutable());
     s_menu.cal_offset_uv = 0;
     s_menu.cal_gain_q16 = 65536;
-    (void)cal_store_write(cal_active());
-    s_menu.dirty_cal = 0U;
-    return 1U;
+
+    if (cal_store_write(cal_active()) == 0U) {
+        s_menu.dirty_cal = 0U;
+        return 1U;
+    }
+    /* Preserve in-memory reset, but keep dirty state for retry and do not
+     * report successful persistence on flash-write failure. */
+    s_menu.dirty_cal = 1U;
+    s_menu.last_change_ms = now;
+    return 0U;
 }
 
 static uint8_t op_wave_save(uint8_t slot)
