@@ -63,10 +63,13 @@ The firmware decodes each raw reading to {0,1,2} using the vendor's thresholds
 `combo = 4 + 3·SEN1 + SEN2` (nine combinations, 4..12) and
 `coupling = 2 − code(CPL)`.
 
-**Coupling is analogue-only on this board:** the AC/DC/GND switch re-routes
-the front end in hardware; no ADC channel or GPIO observes its position. The
-firmware can only label it "set by switch." The stock "Set CPL (SW1) to …"
-prompt cannot be honoured automatically.
+**Coupling (CPL/SW1):** the CPL slide-switch position is read via the same ADC
+resistor ladder (ch7/PA7) and decoded by firmware like SEN1/SEN2. The AC/DC/GND
+signal routing itself is performed by the analogue front end in hardware;
+firmware uses the decoded switch position for UI labels and coupling-dependent
+display/measurement handling, but it does not independently control or verify
+the analogue signal path beyond this ladder reading. If the ladder reading is
+invalid/unavailable, firmware cannot determine the switch position.
 
 **Signal input channel:** ADC1 channel 2 (PA2 / ADC12_IN2) per the vendor's
 ADC1 init (`SQR3 = 2`, watchdog channel 2). This has been confirmed in the
