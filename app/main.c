@@ -1309,9 +1309,13 @@ static void ui_footer_draw(void)
             case 2U: /* Period / duty */
                 ui_fmt_period(v1, sizeof v1);
                 (void)snprintf(c0, sizeof c0, "Per:%s", v1);
-                (void)snprintf(c1, sizeof c1, "Duty:%u.%u%%",
-                               (unsigned)(s_meas_duty_x10 / 10U),
-                               (unsigned)(s_meas_duty_x10 % 10U));
+                if ((s_meas_freq_hz == 0U) && (s_meas_duty_x10 == 0U)) {
+                    (void)snprintf(c1, sizeof c1, "Duty:--");
+                } else {
+                    (void)snprintf(c1, sizeof c1, "Duty:%u.%u%%",
+                                   (unsigned)(s_meas_duty_x10 / 10U),
+                                   (unsigned)(s_meas_duty_x10 % 10U));
+                }
                 (void)snprintf(c2, sizeof c2, "F:%s", f);
                 break;
             case 3U: /* All Disp. */

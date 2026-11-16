@@ -388,7 +388,7 @@ static void menu_ok(struct menu *m, uint32_t now)
         (void)cal_table_clear_all(cal_table_mutable());
         m->dirty_cal = 1U;
         m->last_change_ms = now;
-        menu_note(m, "Clr Offset done", now);
+        menu_note(m, "Cal reset done", now);
         break;
     case MENU_DEFAULTS: {
         struct settings ds;
