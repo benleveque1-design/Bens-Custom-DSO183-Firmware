@@ -86,9 +86,12 @@ Settings/calibration use CRC/version/sequence/alternating-slot schemes for robus
 
 **USART1, PA9 TX / PA10 RX, 115200 8N1, 3.3 V.** CRC-16/CCITT-framed commands/replies and sample streaming.
 
-- Commands include NOP, SET_TIMEBASE, SET_TRIGGER, SET_SPAN, RUN, STOP, GET_STATUS, STREAM, GET_VALUE, etc., with argument validation.
-- GET_VALUE exposes status, measurements, and diagnostic indices (including coherent trigger/ETS diagnostics via the latch protocol added in B4.36).
+- Commands include NOP, SET_TIMEBASE, SET_TRIGGER, SET_SPAN, RUN, STOP, GET_STATUS, STREAM, GET_VALUE, etc., with argument validation and fixed 10-byte command/reply packets.
+- `GET_VALUE` exposes status, measurements, memory, and diagnostic indices (including coherent per-capture latch diagnostics and ETS epoch diagnostics).
+- Read-only queries (`NOP`, `GET_STATUS`, `GET_VALUE`) are serviced immediately; mutating commands are deferred while an acquisition cycle is active using a single-slot overwrite queue (late replies are possible under long waits).
 - Streaming emits binary sample frames; console text is suppressed while streaming for binary cleanliness.
+
+For the authoritative wire/field/semantic contract (opcodes, status/error behavior, complete `GET_VALUE` map, snapshot procedures, timing/deferral/streaming behavior, and compatibility notes), see [`docs/PROTOCOL.md`](PROTOCOL.md).
 
 ## Display and UI
 

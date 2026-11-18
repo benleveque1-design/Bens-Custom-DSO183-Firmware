@@ -16,8 +16,8 @@ Wire formats (little-endian unless noted):
                 CRC-16/CCITT-FALSE over bytes 2..7 (type..reserved zero),
                 stored little-endian.
 
-  reply         A5 5A | 0x03 | seq | op | status | val_lo | val_hi | 0x00 | crc16 LE
-                same CRC coverage as commands.
+  reply         A5 5A | 0x03 | seq | op | status | val_lo | val_hi | crc16 LE
+                (byte 7 is value high byte). CRC-16/CCITT-FALSE over bytes 2..7.
 
 usage: python3 tools/remote_proto.py
 """
@@ -91,8 +91,8 @@ GETV_MEM_STACK_FREE_MIN  = 29
 GETV_MEM_HEAP_USED       = 30
 GETV_MEM_HEAP_HIGHWATER  = 31
 # Stage 0.5 actual MSP low-water
-GETV_MEM_MSP_LOW_WATER   = 32
-GETV_MEM_MSP_FREE_MIN    = 33
+GETV_MEM_MSP_LOW_WATER   = 32  # low 16 bits of raw minimum MSP address (not full 32-bit address)
+GETV_MEM_MSP_FREE_MIN    = 33  # derived headroom: min MSP - stack bottom (bytes)
 # ETS accumulation diagnostics (volatile, epoch-scoped, read-only)
 GETV_ETS_ACCEPTED_SWEEPS = 34
 GETV_ETS_REJECTED_SWEEPS = 35  # triggered+ETS-eligible, reached decision point, failed acceptance; untriggered/non-eligible excluded
@@ -128,6 +128,7 @@ ETS_RESET_TRIG_MODE_CHANGE  = 0x0002
 ETS_RESET_TRIG_SLOPE_CHANGE = 0x0004
 ETS_RESET_TRIG_LEVEL_CHANGE = 0x0008
 ETS_RESET_READY             = 0x0010
+ETS_RESET_INCOMPLETE        = 0x0040  # target reached but reconstruction invalid; epoch restarted
 
 TIMEBASE_FIRST_SINGLE_SHOT = 5
 TIMEBASE_COUNT = 24
@@ -529,6 +530,7 @@ def offline_failures() -> list:
     check("ets reset slope", ETS_RESET_TRIG_SLOPE_CHANGE == 0x0004)
     check("ets reset level", ETS_RESET_TRIG_LEVEL_CHANGE == 0x0008)
     check("ets reset ready", ETS_RESET_READY == 0x0010)
+    check("ets reset incomplete", ETS_RESET_INCOMPLETE == 0x0040)
     check("ets sweeps target", ETS_SWEEPS_TARGET == 16)
 
     # ETS_DIAG_SEQ is a diagnostic update counter (u16 wrap), not an odd/even seqlock.

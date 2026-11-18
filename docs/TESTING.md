@@ -20,6 +20,11 @@ adjustable settings). It is **not** a substitute for bench-only validation
 (acquisition/trigger/ETS timing, DMA/ADC/TIM3/ISR behaviour, display/visual
 checks, or full HW equivalence claims).
 
+For the authoritative PC-link wire/field/semantic contract (opcodes, replies,
+complete `GET_VALUE` map, snapshot procedures, deferral/timing/streaming
+behavior), see [`docs/PROTOCOL.md`](PROTOCOL.md). This document focuses on test
+procedure and validation interpretation.
+
 ---
 
 ## 1. Preconditions and safety

@@ -149,7 +149,7 @@ The detailed breakdown lives in [`docs/FEATURES.md`](docs/FEATURES.md).
 | **Front panel** | Four pushbuttons and three slide switches (gain ×1/×2/×5, range 10 mV/0.1 V/1 V, coupling AC/DC/GND). The switches are read through an ADC resistor ladder. | Bench-verified; CPL coupling position is ladder-decoded and shown/used by firmware, while AC/DC/GND routing is performed by analogue hardware |
 | **Measurements** | Vpp, Vrms, Vmax, Vmin, frequency and duty-cycle maths. | Maths host-tested; Vpp is shown on the panel; the other readouts are not all surfaced yet |
 | **Calibration** | CRC-protected records in reserved flash, two alternating settings slots, a nine-entry per-sensitivity zero table and a CAL ZERO menu page. | Storage host-tested; absolute volts/div scaling is not yet applied to the trace |
-| **PC link** | CRC-16/CCITT-framed commands and replies over USART1 at 115200 8N1: status, measurements, trigger/timebase control, streaming and coherent diagnostics. | Bench-verified |
+| **PC link** | CRC-16/CCITT-framed commands and replies over USART1 at 115200 8N1: status, measurements, trigger/timebase control, streaming and coherent diagnostics. See [`docs/PROTOCOL.md`](docs/PROTOCOL.md). | Bench-verified |
 | **Waveform storage** | CRC-protected waveform slots and storage logic. | Partial: full Save/Load menu parity is not complete |
 
 **Not there yet, and not claimed:** RMS/frequency/duty readouts on the panel,
