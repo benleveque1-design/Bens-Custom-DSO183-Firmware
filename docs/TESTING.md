@@ -161,8 +161,12 @@ or harness cases). Record set/get status and values:
   acceptance/normalisation.
 - **Streaming:** toggle on/off; where stable, capture ≥1 valid frame and sanity
   range-check samples.
-- **Calibration (remote):** offset/gain set/get and `CAL_RESET` read-backs
-  (no persistent flash write implied by these protocol ops as exercised here).
+- **Calibration (remote):** offset/gain set/get, `CAL_SAVE`, and `CAL_RESET` read-backs
+  with correct reply status. `CAL_SAVE` and `CAL_RESET` perform immediate calibration
+  persistence attempts by design (flash write on success; on failure the firmware
+  preserves retry/pending state and must not report successful persistence). Offset/
+  gain edits may schedule debounced calibration persistence; treat power-cycle
+  persistence claims as requiring explicit pre/post evidence (see #12).
 - **Averaging:** set/read back supported values.
 - **Wave save/recall:** save slots, verify saved flags, recall while stopped.
 - **UART starvation regression (#16):** `RUN`; two paced `SET_TIMEBASE` +

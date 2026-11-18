@@ -25,7 +25,7 @@ If it is not listed here as verified, assume it is unproven on hardware.
 - **Front-panel ladder:** gain/range/coupling slide switches decode from ADC ladder channels; sensitivity combinations and panel labels follow the decoded switch positions (CPL coupling is read via the ladder; analogue AC/DC/GND routing is performed in hardware).
 - **PC link (UART 115200 8N1):** CRC-framed commands/replies, status/value queries, streaming, and coherent diagnostic reads (including GETV latch protocol) verified in use.
 - **Real-time trigger/alignment (B4.36, build 41320, 2026-11-15):** 12 configs × 50 captures (tb5/tb6/tb9, AUTO/NORM, rise/fall, 1 kHz 50% square, level 970) — **600/600 coherent, 0 no-frame, 0 diag errors, 0 rejected frames**. Requested edge within ±2 of index 96 in **all 600 captures**. **tb5 (50 µs/div) rising:** 50/50 AUTO and 50/50 NORM at 96 (previously 0/100 on 48462). Diagnostics showed `refined_found=1`, `fallback=0`, `anchor_kind=0` (local) throughout this run.
-- **Host test suite:** `make test` passes (36 suites, 1,318 checks on the B4.36 tree), including anchoring/window/trigger/ETS/diag/protocol coverage.
+- **Host test suite:** `make test` passes (38 suites as of the current tree), including anchoring/window/trigger/ETS/diag/protocol, menu, and display-math coverage.
 - **Flash layout/safety:** reserved pages (settings, calibration, waveform slots, vendor device record) are separate from the application image; page-wise, read-back-verified flashing used (page 0 last). Recovery image for 14139 preserved.
 
 ## 2. Verified — host-tested only (logic proven, hardware path not fully exercised from this tree)
