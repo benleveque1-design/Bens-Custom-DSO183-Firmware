@@ -285,6 +285,27 @@ def suite_stream(client) -> list:
     out = []
     frames = []
     try:
+        # Establish known-good preconditions: earlier suites (e.g. control) may
+        # leave slow timebase/extreme settings; stream capture expects frames.
+        try:
+            client.cmd(rp.OP_STOP, 0)
+        except Exception:
+            pass
+        try:
+            client.cmd(rp.OP_STREAM, 0)
+        except Exception:
+            pass
+        try:
+            client.cmd(rp.OP_SET_TIMEBASE, 10)
+            client.cmd(rp.OP_SET_TRIG_MODE, 0)
+            client.cmd(rp.OP_SET_TRIG_SLOPE, 2)
+            client.cmd(rp.OP_SET_TRIGGER, 2048)
+            client.cmd(rp.OP_SET_SPAN, 1024)
+            client.cmd(rp.OP_SET_AVG, 1)
+        except Exception:
+            # Best-effort preconditioning; continue so failures are observed.
+            pass
+
         r = client.cmd(rp.OP_STREAM, 1)
         ok1 = r is not None and r[0] == rp.ST_OK and r[1] == 1
         out.append({"suite": "stream", "name": "stream_on", "ok": ok1,
@@ -304,33 +325,55 @@ def suite_stream(client) -> list:
             frames.append(f)
         ok = len(frames) == 3
         det = "%d frames in window" % len(frames)
-        content_ok = True
         if ok:
             contiguous = all(
                 ((frames[i + 1]["seq"] - frames[i]["seq"]) & 0xFF) == 1
                 for i in range(len(frames) - 1))
-            ok = contiguous
             det += " seq contiguous=%s" % contiguous
-            content_ok = ok and all(
-                f["n"] == 256 and all(0 <= s <= 4095 for s in f["samples"])
+            content_ok = contiguous and all(
+                f["n"] == len(f.get("samples", [])) and f["n"] == 320
+                and all(0 <= s <= 4095 for s in f.get("samples", []))
                 for f in frames)
+            ok = content_ok
             if content_ok:
-                det += " frame content ok (n=256, samples in 0..4095)"
+                det += " frame content ok (n=320, samples in 0..4095)"
+        else:
+            det += " (expected 3 contiguous valid frames)"
         out.append({"suite": "stream", "name": "frames_captured", "ok": ok,
                     "detail": det, "skipped": False})
 
-        r = client.cmd(rp.OP_STOP, 0)
-        out.append({"suite": "stream", "name": "stop_after_stream",
-                    "ok": r is not None and r[0] == rp.ST_OK,
-                    "detail": "status %d value %d" % (r[0], r[1]) if r else "no reply",
-                    "skipped": False})
-        r = client.cmd(rp.OP_STREAM, 0)
-        ok3 = r is not None and r[0] == rp.ST_OK and r[1] == 0
-        out.append({"suite": "stream", "name": "stream_off_after_stream",
-                    "ok": ok3,
-                    "detail": "status %d value %d" % (r[0], r[1]) if r else "no reply",
-                    "skipped": False})
+        stop_ok = False
+        try:
+            r = client.cmd(rp.OP_STOP, 0)
+            stop_ok = r is not None and r[0] == rp.ST_OK
+            out.append({"suite": "stream", "name": "stop_after_stream",
+                        "ok": stop_ok,
+                        "detail": "status %d value %d" % (r[0], r[1]) if r else "no reply",
+                        "skipped": False})
+        except Exception as e:
+            out.append({"suite": "stream", "name": "stop_after_stream",
+                        "ok": False, "detail": "exception: %r" % e, "skipped": False})
+
+        try:
+            r = client.cmd(rp.OP_STREAM, 0)
+            ok3 = r is not None and r[0] == rp.ST_OK and r[1] == 0
+            out.append({"suite": "stream", "name": "stream_off_after_stream",
+                        "ok": ok3,
+                        "detail": "status %d value %d" % (r[0], r[1]) if r else "no reply",
+                        "skipped": False})
+        except Exception as e:
+            out.append({"suite": "stream", "name": "stream_off_after_stream",
+                        "ok": False, "detail": "exception: %r" % e, "skipped": False})
     except Exception as e:
+        # Best-effort cleanup after unexpected failure, without masking it.
+        try:
+            client.cmd(rp.OP_STREAM, 0)
+        except Exception:
+            pass
+        try:
+            client.cmd(rp.OP_STOP, 0)
+        except Exception:
+            pass
         out.append({"suite": "stream", "name": "stream_window", "ok": False,
                     "detail": "exception: %r" % e, "skipped": False})
     return out
