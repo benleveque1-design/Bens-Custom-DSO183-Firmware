@@ -118,6 +118,168 @@ static void test_step_clamped(void)
     CHECK(menu_logic_step_clamped(262144, 1, 1024, 16384, 262144) == 262144);
 }
 
+static void test_persist_retry_timing_and_backoff(void)
+{
+    CHECK(MENU_PERSIST_BASE_MS == 800U);
+    CHECK(MENU_PERSIST_BACKOFF_MAX_MS == 30000U);
+    CHECK(menu_logic_persist_retry_delay_ms(0U) == 800U);
+    CHECK(menu_logic_persist_retry_delay_ms(1U) == 800U);
+    CHECK(menu_logic_persist_retry_delay_ms(2U) == 1600U);
+    CHECK(menu_logic_persist_retry_delay_ms(3U) == 3200U);
+    CHECK(menu_logic_persist_retry_delay_ms(4U) == 6400U);
+    CHECK(menu_logic_persist_retry_delay_ms(5U) == 12800U);
+    CHECK(menu_logic_persist_retry_delay_ms(6U) == 25600U);
+    CHECK(menu_logic_persist_retry_delay_ms(7U) == 30000U);
+    CHECK(menu_logic_persist_retry_delay_ms(20U) == 30000U);
+    CHECK(menu_logic_persist_retry_delay_ms(255U) == 30000U);
+}
+
+static void test_persist_notification_throttling(void)
+{
+    CHECK(MENU_PERSIST_NOTE_THROTTLE_MS == 10000U);
+    CHECK(menu_logic_persist_should_note_failure(0U, 0U, 0U) == 0U);
+    /* First failure in episode: immediate feedback. */
+    CHECK(menu_logic_persist_should_note_failure(1000U, 1U, 0U) == 1U);
+    /* Subsequent failures: throttled. */
+    CHECK(menu_logic_persist_should_note_failure(5000U, 2U, 1000U) == 0U);
+    CHECK(menu_logic_persist_should_note_failure(10999U, 2U, 1000U) == 0U);
+    CHECK(menu_logic_persist_should_note_failure(11000U, 2U, 1000U) == 1U);
+    CHECK(menu_logic_persist_should_note_failure(25000U, 5U, 15000U) == 1U);
+}
+
+struct pdom {
+    uint8_t  dirty;
+    uint8_t  fail_count;
+    uint8_t  failing;
+    uint32_t due_ms;
+    uint32_t note_ms;
+    uint8_t  notes;
+    uint8_t  recovery_notes;
+};
+
+static void pdom_mark_dirty(struct pdom *d, uint32_t now)
+{
+    d->dirty = 1U;
+    d->fail_count = 0U;
+    d->failing = 0U;
+    d->note_ms = 0U;
+    d->due_ms = now + MENU_PERSIST_BASE_MS;
+}
+
+static void pdom_attempt(struct pdom *d, uint32_t now, int ok)
+{
+    if ((d->dirty == 0U) || ((int32_t)(now - d->due_ms) < 0)) {
+        return;
+    }
+    if (ok != 0) {
+        if (d->failing != 0U) {
+            d->recovery_notes++;
+        }
+        d->dirty = 0U;
+        d->fail_count = 0U;
+        d->failing = 0U;
+        d->note_ms = 0U;
+    } else {
+        if (d->fail_count < 255U) {
+            d->fail_count++;
+        }
+        if (menu_logic_persist_should_note_failure(now, d->fail_count, d->note_ms) != 0U) {
+            d->notes++;
+            d->note_ms = now;
+        }
+        d->failing = 1U;
+        d->due_ms = now + menu_logic_persist_retry_delay_ms(d->fail_count);
+    }
+}
+
+static void test_persist_recovery_and_dirty_preservation(void)
+{
+    struct pdom d = {0};
+
+    /* New change -> debounce 800ms, silent on normal success. */
+    pdom_mark_dirty(&d, 1000U);
+    CHECK(d.dirty == 1U);
+    CHECK(d.due_ms == 1800U);
+    pdom_attempt(&d, 1799U, 1);
+    CHECK(d.dirty == 1U);
+    pdom_attempt(&d, 1800U, 1);
+    CHECK(d.dirty == 0U);
+    CHECK(d.failing == 0U);
+    CHECK(d.fail_count == 0U);
+    CHECK(d.notes == 0U);
+    CHECK(d.recovery_notes == 0U);
+
+    /* Repeated failures: dirty preserved, bounded backoff, throttled notes. */
+    pdom_mark_dirty(&d, 2000U);
+    pdom_attempt(&d, 2800U, 0); /* fail #1 */
+    CHECK(d.dirty == 1U);
+    CHECK(d.failing == 1U);
+    CHECK(d.fail_count == 1U);
+    CHECK(d.notes == 1U);
+    CHECK(d.due_ms == 3600U);
+    pdom_attempt(&d, 3600U, 0); /* fail #2 */
+    CHECK(d.fail_count == 2U);
+    CHECK(d.due_ms == 5200U); /* +1600 */
+    CHECK(d.notes == 1U);      /* throttled */
+    pdom_attempt(&d, 15200U, 0); /* simulate later attempt at throttled time */
+    /* fail #3 at 15200: note allowed (>=10000 since 2800) */
+    CHECK(d.fail_count == 3U);
+    CHECK(d.notes == 2U);
+    CHECK(d.due_ms == 18400U); /* +3200 */
+
+    /* Recovery after failures: success clears state and reports once. */
+    pdom_attempt(&d, 18400U, 1);
+    CHECK(d.dirty == 0U);
+    CHECK(d.failing == 0U);
+    CHECK(d.fail_count == 0U);
+    CHECK(d.recovery_notes == 1U);
+
+    /* Max backoff cap reached. */
+    pdom_mark_dirty(&d, 30000U);
+    {
+        uint32_t t = 30800U;
+        int i;
+        for (i = 0; i < 8; i++) {
+            pdom_attempt(&d, t, 0);
+            t = d.due_ms;
+        }
+        CHECK(d.fail_count == 8U);
+        CHECK(menu_logic_persist_retry_delay_ms(d.fail_count) == 30000U);
+        CHECK(d.due_ms == t);
+        /* next interval remains capped */
+        pdom_attempt(&d, t, 0);
+        CHECK(d.fail_count == 9U);
+        CHECK((d.due_ms - t) == 30000U);
+    }
+}
+
+static void test_persist_domains_independent(void)
+{
+    struct pdom settings = {0};
+    struct pdom cal = {0};
+
+    pdom_mark_dirty(&settings, 1000U);
+    pdom_mark_dirty(&cal, 1200U);
+    /* Cal fails repeatedly, settings succeeds independently. */
+    pdom_attempt(&cal, 2000U, 0);       /* cal fail #1 */
+    pdom_attempt(&settings, 1800U, 1);  /* settings ok */
+    CHECK(settings.dirty == 0U);
+    CHECK(settings.failing == 0U);
+    CHECK(cal.dirty == 1U);
+    CHECK(cal.failing == 1U);
+    CHECK(cal.fail_count == 1U);
+    CHECK(cal.due_ms == 2800U);         /* 2000 + 800, unaffected by settings */
+    /* Settings changed again later: independent fresh episode. */
+    pdom_mark_dirty(&settings, 2500U);
+    CHECK(settings.due_ms == 3300U);
+    CHECK(cal.due_ms == 2800U);
+    CHECK(cal.fail_count == 1U);
+    pdom_attempt(&cal, 2800U, 0);       /* cal fail #2 backs off */
+    CHECK(cal.fail_count == 2U);
+    CHECK(cal.due_ms == 4400U);
+    CHECK(settings.dirty == 1U);        /* still pending independently */
+}
+
 int main(void)
 {
     test_page_transitions();
@@ -126,6 +288,10 @@ int main(void)
     test_step_index_wrap();
     test_step_mod();
     test_step_clamped();
+    test_persist_retry_timing_and_backoff();
+    test_persist_notification_throttling();
+    test_persist_recovery_and_dirty_preservation();
+    test_persist_domains_independent();
 
     if (failures != 0) {
         printf("test_menu: %d failure(s)\n", failures);

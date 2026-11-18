@@ -19,4 +19,15 @@ int32_t menu_logic_step_mod(int32_t current, int dir, int32_t count);
 int32_t menu_logic_step_clamped(int32_t current, int dir, int32_t step,
                                 int32_t lo, int32_t hi);
 
+/* Debounced persistence retry/notification policy (pure, deterministic).
+ * fail_count is the number of consecutive failed save attempts in the
+ * current episode (1-based for the first failure). */
+#define MENU_PERSIST_BASE_MS      800U
+#define MENU_PERSIST_BACKOFF_MAX_MS 30000U
+#define MENU_PERSIST_NOTE_THROTTLE_MS 10000U
+
+uint32_t menu_logic_persist_retry_delay_ms(uint8_t fail_count);
+uint8_t menu_logic_persist_should_note_failure(uint32_t now, uint8_t fail_count,
+                                               uint32_t last_note_ms);
+
 #endif

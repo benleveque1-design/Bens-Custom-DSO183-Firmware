@@ -61,3 +61,37 @@ int32_t menu_logic_step_clamped(int32_t current, int dir, int32_t step,
 {
     return menu_logic_clamp32(current + (dir * step), lo, hi);
 }
+
+uint32_t menu_logic_persist_retry_delay_ms(uint8_t fail_count)
+{
+    uint32_t delay = MENU_PERSIST_BASE_MS;
+    uint8_t i;
+
+    if (fail_count == 0U) {
+        return delay;
+    }
+    /* 1st failure -> 800ms, 2nd -> 1600ms, ... capped. */
+    for (i = 1U; i < fail_count && delay < MENU_PERSIST_BACKOFF_MAX_MS; i++) {
+        if (delay > (MENU_PERSIST_BACKOFF_MAX_MS / 2U)) {
+            delay = MENU_PERSIST_BACKOFF_MAX_MS;
+            break;
+        }
+        delay <<= 1U;
+    }
+    if (delay > MENU_PERSIST_BACKOFF_MAX_MS) {
+        delay = MENU_PERSIST_BACKOFF_MAX_MS;
+    }
+    return delay;
+}
+
+uint8_t menu_logic_persist_should_note_failure(uint32_t now, uint8_t fail_count,
+                                               uint32_t last_note_ms)
+{
+    if (fail_count == 0U) {
+        return 0U;
+    }
+    if (fail_count == 1U) {
+        return 1U;
+    }
+    return (uint8_t)((now - last_note_ms) >= MENU_PERSIST_NOTE_THROTTLE_MS);
+}

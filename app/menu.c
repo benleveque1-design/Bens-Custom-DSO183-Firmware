@@ -217,6 +217,54 @@ static void menu_note(struct menu *m, const char *text, uint32_t now)
     m->note_ms = now;
 }
 
+void menu_settings_changed(struct menu *m, uint32_t now)
+{
+    m->dirty = 1U;
+    m->last_change_ms = now;
+    m->settings_due_ms = now + MENU_SAVE_MS;
+    m->settings_fail_count = 0U;
+    m->settings_failing = 0U;
+    m->settings_note_ms = 0U;
+}
+
+static void menu_settings_dirty(struct menu *m, uint32_t now)
+{
+    menu_settings_changed(m, now);
+}
+
+void menu_cal_changed(struct menu *m, uint32_t now)
+{
+    m->dirty_cal = 1U;
+    m->last_change_ms = now;
+    m->cal_due_ms = now + MENU_SAVE_MS;
+    m->cal_fail_count = 0U;
+    m->cal_failing = 0U;
+    m->cal_note_ms = 0U;
+}
+
+void menu_cal_retry(struct menu *m, uint32_t now)
+{
+    /* Preserve dirty_cal and schedule an independent retry (e.g. after an
+     * immediate save/reset failure outside menu_persist). */
+    m->dirty_cal = 1U;
+    m->last_change_ms = now;
+    if (m->cal_fail_count < 255U) {
+        m->cal_fail_count++;
+    }
+    m->cal_failing = 1U;
+    m->cal_due_ms = now + menu_logic_persist_retry_delay_ms(m->cal_fail_count);
+}
+
+static void menu_cal_dirty(struct menu *m, uint32_t now)
+{
+    menu_cal_changed(m, now);
+}
+
+static void menu_cal_retry_schedule(struct menu *m, uint32_t now)
+{
+    menu_cal_retry(m, now);
+}
+
 /* One step of the current page: +1 forward, -1 backward. */
 static void menu_step_once(struct menu *m, int dir, uint32_t now)
 {
@@ -226,8 +274,7 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
                                                  (int32_t)TIMEBASE_COUNT);
         if (acq_set_timebase((uint8_t)idx) == ACQ_OK) {
             m->timebase_idx = (uint8_t)idx;
-            m->dirty = 1U;
-            m->last_change_ms = now;
+            menu_settings_dirty(m, now);
         }
         break;
     }
@@ -239,8 +286,7 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
                 (void)acq_trigger_arm();
             }
             m->trigger_mode = (uint8_t)mode;
-            m->dirty = 1U;
-            m->last_change_ms = now;
+            menu_settings_dirty(m, now);
         }
         break;
     }
@@ -255,8 +301,7 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
         if ((uint16_t)level != m->trigger_level) {
             if (acq_set_trigger_level((uint16_t)level) == ACQ_OK) {
                 m->trigger_level = (uint16_t)level;
-                m->dirty = 1U;
-                m->last_change_ms = now;
+                menu_settings_dirty(m, now);
             }
         }
         break;
@@ -267,8 +312,7 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
         if ((uint8_t)sl != s_trig_slope) {
             s_trig_slope = (uint8_t)sl;
             m->trigger_slope = s_trig_slope;
-            m->dirty = 1U;
-            m->last_change_ms = now;
+            menu_settings_dirty(m, now);
         }
         break;
     }
@@ -289,13 +333,11 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
             if ((cal_table_set(cal_table_mutable(), m->combo_idx,
                                m->frame_mean) == 0U)
                 && (changed != 0U)) {
-                m->dirty_cal = 1U;
-                m->last_change_ms = now;
+                menu_cal_dirty(m, now);
             }
         } else if (cal_table_present(cal_table_active(), m->combo_idx) != 0U) {
             (void)cal_table_clear(cal_table_mutable(), m->combo_idx);
-            m->dirty_cal = 1U;
-            m->last_change_ms = now;
+            menu_cal_dirty(m, now);
         }
         break;
     }
@@ -310,8 +352,7 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
             c.offset_uv = m->cal_offset_uv;
             c.gain_q16 = m->cal_gain_q16;
             cal_active_set(&c);
-            m->dirty_cal = 1U;
-            m->last_change_ms = now;
+            menu_cal_dirty(m, now);
         }
         break;
     }
@@ -326,8 +367,7 @@ static void menu_step_once(struct menu *m, int dir, uint32_t now)
             c.offset_uv = m->cal_offset_uv;
             c.gain_q16 = m->cal_gain_q16;
             cal_active_set(&c);
-            m->dirty_cal = 1U;
-            m->last_change_ms = now;
+            menu_cal_dirty(m, now);
         }
         break;
     }
@@ -388,10 +428,12 @@ static void menu_ok(struct menu *m, uint32_t now)
         (void)cal_table_clear_all(cal_table_mutable());
         if (cal_store_write(cal_active()) == 0U) {
             m->dirty_cal = 0U;
+            m->cal_fail_count = 0U;
+            m->cal_failing = 0U;
+            m->cal_note_ms = 0U;
             menu_note(m, "Cal reset done", now);
         } else {
-            m->dirty_cal = 1U;
-            m->last_change_ms = now;
+            menu_cal_retry_schedule(m, now);
             menu_note(m, "Cal reset fail", now);
         }
         break;
@@ -412,8 +454,7 @@ static void menu_ok(struct menu *m, uint32_t now)
         (void)acq_set_trigger_level(m->trigger_level);
         runstate_run_set(ds.run);
         runstate_stream_set(ds.stream);
-        m->dirty = 1U;
-        m->last_change_ms = now;
+        menu_settings_dirty(m, now);
         menu_note(m, "Default restored", now);
         break;
     }
@@ -431,7 +472,7 @@ static void menu_ok(struct menu *m, uint32_t now)
 
 static void menu_persist(struct menu *m, uint32_t now)
 {
-    if ((m->dirty != 0U) && ((now - m->last_change_ms) >= MENU_SAVE_MS)) {
+    if ((m->dirty != 0U) && ((int32_t)(now - m->settings_due_ms) >= 0)) {
         struct settings s;
 
         settings_defaults(&s);
@@ -442,21 +483,51 @@ static void menu_persist(struct menu *m, uint32_t now)
         s.stream = 0U;   /* never persist PC-link streaming (freezes the UI) */
         s.trigger_slope = s_trig_slope;
         if (settings_save(&s) == 0U) {
+            if (m->settings_failing != 0U) {
+                menu_note(m, "Settings saved", now);
+            }
             m->dirty = 0U;
+            m->settings_fail_count = 0U;
+            m->settings_failing = 0U;
+            m->settings_note_ms = 0U;
         } else {
-            m->last_change_ms = now;    /* retry after the debounce */
+            if (m->settings_fail_count < 255U) {
+                m->settings_fail_count++;
+            }
+            if (menu_logic_persist_should_note_failure(now, m->settings_fail_count,
+                                                      m->settings_note_ms) != 0U) {
+                menu_note(m, "Settings save fail", now);
+                m->settings_note_ms = now;
+            }
+            m->settings_failing = 1U;
+            m->settings_due_ms = now + menu_logic_persist_retry_delay_ms(m->settings_fail_count);
         }
     }
-    if ((m->dirty_cal != 0U) && ((now - m->last_change_ms) >= MENU_SAVE_MS)) {
+    if ((m->dirty_cal != 0U) && ((int32_t)(now - m->cal_due_ms) >= 0)) {
         struct cal c;
 
         c.offset_uv = m->cal_offset_uv;
         c.gain_q16 = m->cal_gain_q16;
         /* Persists the base pair AND the live zero table. */
         if (cal_store_write(&c) == 0U) {
+            if (m->cal_failing != 0U) {
+                menu_note(m, "Cal saved", now);
+            }
             m->dirty_cal = 0U;
+            m->cal_fail_count = 0U;
+            m->cal_failing = 0U;
+            m->cal_note_ms = 0U;
         } else {
-            m->last_change_ms = now;    /* retry after the debounce */
+            if (m->cal_fail_count < 255U) {
+                m->cal_fail_count++;
+            }
+            if (menu_logic_persist_should_note_failure(now, m->cal_fail_count,
+                                                      m->cal_note_ms) != 0U) {
+                menu_note(m, "Cal save fail", now);
+                m->cal_note_ms = now;
+            }
+            m->cal_failing = 1U;
+            m->cal_due_ms = now + menu_logic_persist_retry_delay_ms(m->cal_fail_count);
         }
     }
 }
@@ -469,8 +540,7 @@ static void focus_step(struct menu *m, int dir, uint32_t now)
                                                  (int32_t)TIMEBASE_COUNT);
         if (acq_set_timebase((uint8_t)idx) == ACQ_OK) {
             m->timebase_idx = (uint8_t)idx;
-            m->dirty = 1U;
-            m->last_change_ms = now;
+            menu_settings_dirty(m, now);
         }
         break;
     }
@@ -481,8 +551,7 @@ static void focus_step(struct menu *m, int dir, uint32_t now)
                 (void)acq_trigger_arm();
             }
             m->trigger_mode = (uint8_t)mode;
-            m->dirty = 1U;
-            m->last_change_ms = now;
+            menu_settings_dirty(m, now);
         }
         break;
     }
@@ -492,8 +561,7 @@ static void focus_step(struct menu *m, int dir, uint32_t now)
         if ((uint16_t)level != m->trigger_level) {
             if (acq_set_trigger_level((uint16_t)level) == ACQ_OK) {
                 m->trigger_level = (uint16_t)level;
-                m->dirty = 1U;
-                m->last_change_ms = now;
+                menu_settings_dirty(m, now);
             }
         }
         break;
@@ -503,8 +571,7 @@ static void focus_step(struct menu *m, int dir, uint32_t now)
         if ((uint8_t)sl != s_trig_slope) {
             s_trig_slope = (uint8_t)sl;
             m->trigger_slope = s_trig_slope;
-            m->dirty = 1U;
-            m->last_change_ms = now;
+            menu_settings_dirty(m, now);
         }
         break;
     }
@@ -627,8 +694,7 @@ void menu_poll(struct menu *m)
                 break;
             case EV_OK:
                 runstate_run_set((uint8_t)(!runstate_run()));
-                m->dirty = 1U;
-                m->last_change_ms = ev_ms;
+                menu_settings_dirty(m, ev_ms);
                 menu_note(m, runstate_run() ? "Running" : "Stopped", ev_ms);
                 break;
             default:

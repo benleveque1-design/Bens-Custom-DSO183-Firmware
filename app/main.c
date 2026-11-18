@@ -374,8 +374,7 @@ static uint8_t op_trig_mode(uint8_t mode)
         (void)acq_trigger_arm();
     }
     s_menu.trigger_mode = mode;
-    s_menu.dirty = 1U;
-    s_menu.last_change_ms = HAL_GetTick();
+    menu_settings_changed(&s_menu, HAL_GetTick());
     return 1U;
 }
 
@@ -385,8 +384,7 @@ static uint8_t op_trig_slope(uint8_t slope)
         return 0U;
     }
     s_trig_slope = slope;
-    s_menu.dirty = 1U;
-    s_menu.last_change_ms = HAL_GetTick();
+    menu_settings_changed(&s_menu, HAL_GetTick());
     return 1U;
 }
 
@@ -410,8 +408,7 @@ static uint8_t op_cal_set_offset_mv(int16_t mv)
     c.offset_uv = (int32_t)mv * 1000L;
     cal_active_set(&c);
     s_menu.cal_offset_uv = c.offset_uv;
-    s_menu.dirty_cal = 1U;
-    s_menu.last_change_ms = HAL_GetTick();
+    menu_cal_changed(&s_menu, HAL_GetTick());
     return 1U;
 }
 
@@ -422,8 +419,7 @@ static uint8_t op_cal_set_gain_x1000(uint16_t g)
     c.gain_q16 = (int32_t)(((uint32_t)g * 65536U + 500U) / 1000U);
     cal_active_set(&c);
     s_menu.cal_gain_q16 = c.gain_q16;
-    s_menu.dirty_cal = 1U;
-    s_menu.last_change_ms = HAL_GetTick();
+    menu_cal_changed(&s_menu, HAL_GetTick());
     return 1U;
 }
 
@@ -432,11 +428,13 @@ static uint8_t op_cal_save(void)
     /* Persist base cal; cal_store packs the live table state as well. */
     if (cal_store_write(cal_active()) == 0U) {
         s_menu.dirty_cal = 0U;
+        s_menu.cal_fail_count = 0U;
+        s_menu.cal_failing = 0U;
+        s_menu.cal_note_ms = 0U;
         return 1U;
     }
     /* Ensure a failed explicit save schedules menu_persist retry. */
-    s_menu.dirty_cal = 1U;
-    s_menu.last_change_ms = HAL_GetTick();
+    menu_cal_retry(&s_menu, HAL_GetTick());
     return 0U;
 }
 
@@ -451,12 +449,14 @@ static uint8_t op_cal_reset(void)
 
     if (cal_store_write(cal_active()) == 0U) {
         s_menu.dirty_cal = 0U;
+        s_menu.cal_fail_count = 0U;
+        s_menu.cal_failing = 0U;
+        s_menu.cal_note_ms = 0U;
         return 1U;
     }
     /* Preserve in-memory reset, but keep dirty state for retry and do not
      * report successful persistence on flash-write failure. */
-    s_menu.dirty_cal = 1U;
-    s_menu.last_change_ms = now;
+    menu_cal_retry(&s_menu, now);
     return 0U;
 }
 

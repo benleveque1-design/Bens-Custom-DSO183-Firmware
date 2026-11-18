@@ -59,11 +59,30 @@ struct menu {
     uint8_t  dirty;            /* settings need saving                    */
     uint8_t  dirty_cal;        /* calibration needs saving                */
     uint8_t  drawn;            /* the settings card is currently painted  */
+    /* Independent debounced persistence retry/notification state. */
+    uint32_t settings_due_ms;  /* next eligible settings save attempt     */
+    uint32_t cal_due_ms;       /* next eligible calibration save attempt  */
+    uint8_t  settings_fail_count;
+    uint8_t  cal_fail_count;
+    uint32_t settings_note_ms; /* last throttled settings-fail note time  */
+    uint32_t cal_note_ms;      /* last throttled cal-fail note time       */
+    uint8_t  settings_failing; /* in a settings failure episode            */
+    uint8_t  cal_failing;      /* in a calibration failure episode        */
 };
 
 void menu_init(struct menu *m);
 void menu_poll(struct menu *m);
 void menu_render(struct menu *m);
+
+/* Mark settings persistence as needing a (debounced) save due to a user
+ * change: resets any in-progress failure/backoff episode. */
+void menu_settings_changed(struct menu *m, uint32_t now);
+/* Mark calibration persistence as needing a (debounced) save due to a user
+ * change: resets any in-progress failure/backoff episode. */
+void menu_cal_changed(struct menu *m, uint32_t now);
+/* Preserve dirty calibration state and schedule an independent retry after a
+ * failed immediate save/reset attempt (bounded backoff). */
+void menu_cal_retry(struct menu *m, uint32_t now);
 
 /* Offer the current frame to the menu: the CAL ZERO page stores `mean` as the
  * zero level for `combo_idx` (range * 3 + gain).  The acquisition path calls
